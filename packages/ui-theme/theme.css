@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Heretek Dark Theme - The Void with Blood Red Accents */
+    --background: 0 0% 3%;
+    --foreground: 0 0% 85%;
+    --card: 0 0% 5%;
+    --card-foreground: 0 0% 85%;
+    --popover: 0 0% 2%;
+    --popover-foreground: 0 0% 85%;
+    --primary: 0 80% 55%;
+    --primary-foreground: 0 0% 3%;
+    --secondary: 0 8% 12%;
+    --secondary-foreground: 0 0% 82%;
+    --muted: 0 6% 10%;
+    --muted-foreground: 0 5% 55%;
+    --accent: 0 75% 50%;
+    --accent-foreground: 0 0% 95%;
+    --destructive: 0 85% 55%;
+    --destructive-foreground: 0 0% 95%;
+    --border: 0 15% 15%;
+    --input: 0 10% 8%;
+    --ring: 0 80% 55%;
+    --radius: 0.25rem;
+
+    /* Distinct Semantic Status Tokens (separate from brand red) */
+    --status-ok: 142 70% 45%;
+    --status-warn: 38 92% 55%;
+    --status-info: 210 25% 60%;
+    --status-critical: 0 90% 60%;
+  }
+
+  ::selection {
+    background-color: hsl(var(--accent));
+    color: hsl(var(--accent-foreground));
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-mono antialiased;
+  }
+}
+
+/* Glass Viewport Effect */
+.glass {
+  backdrop-filter: blur(12px) saturate(120%);
+  -webkit-backdrop-filter: blur(12px) saturate(120%);
+  background: linear-gradient(135deg, hsl(0 0% 5% / 0.9) 0%, hsl(0 5% 8% / 0.8) 100%);
+  border: 1px solid hsl(0 20% 15% / 0.6);
+}
+
+/* Heretek Blood Border Effect */
+.blood-border {
+  border: 1px solid transparent;
+  background:
+    linear-gradient(hsl(0 0% 5%), hsl(0 0% 5%)) padding-box,
+    linear-gradient(
+        135deg,
+        hsl(0 70% 35%) 0%,
+        hsl(0 50% 20%) 25%,
+        hsl(0 60% 30%) 50%,
+        hsl(0 40% 18%) 75%,
+        hsl(0 70% 35%) 100%
+      )
+      border-box;
+}
+
+/* Corruption Glow */
+.corruption-glow:hover {
+  box-shadow: 0 0 15px -3px hsl(0 80% 55% / 0.4);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: hsl(0 0% 4%);
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(0 40% 25%);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(0 60% 35%);
+}

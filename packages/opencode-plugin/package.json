@@ -1,0 +1,17 @@
+{
+  "name": "@scraper-swarm/opencode-plugin",
+  "version": "0.1.0",
+  "description": "OpenCode v2 plugin connecting AI agents to the Scraper Swarm MCP gateway with egress guards and typed tools",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
