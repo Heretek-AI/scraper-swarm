@@ -1,0 +1,10 @@
+id: egress-web
+name: Egress proxy (Smokescreen)
+tier: support
+verified: false
+license: { spdx: MIT }
+image: { build: deploy/egress }
+resources:
+  standard: { cpus: 1, mem: 256m }
+networks: [egress-web, egress-out]
+hardening: { user: "65532:65532", read_only: true }

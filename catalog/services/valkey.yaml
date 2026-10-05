@@ -1,0 +1,12 @@
+id: valkey
+name: Valkey
+tier: support
+verified: false
+license: { spdx: BSD-3-Clause }
+image: { repo: valkey/valkey, tag: latest }
+resources:
+  standard: { cpus: 0.5, mem: 256m }
+networks: [svc]
+port: 6379
+hardening: { user: "999:999", read_only: true, tmpfs: ["/tmp"] }
+volumes: ["data:/data"]

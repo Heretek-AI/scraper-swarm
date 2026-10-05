@@ -1,0 +1,21 @@
+id: crawl4ai
+name: Crawl4AI
+tier: core
+verified: false
+license: { spdx: Apache-2.0 }
+image: { repo: unclecode/crawl4ai, tag: latest }
+resources:
+  lite:     { cpus: 1, mem: 2g, shm: 1g }
+  standard: { cpus: 2, mem: 4g, shm: 2g }
+  heavy:    { cpus: 4, mem: 8g, shm: 4g }
+networks: [svc, egress-web]
+port: 11235
+hardening: { user: "1000:1000", seccomp: chromium }
+secrets: [LLM_API_KEY]
+native_exposable: true
+params_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    llm_provider: { type: string, pattern: "^[a-z0-9_.:/-]{1,80}$" }
+param_env: { llm_provider: LLM_PROVIDER }

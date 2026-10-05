@@ -1,0 +1,19 @@
+id: searxng
+name: SearXNG
+tier: core
+verified: false
+license:
+  spdx: AGPL-3.0-only
+  notice: "SearXNG is AGPL-3.0. It runs unmodified in its own container; Scraper Swarm does not link against it."
+image: { repo: searxng/searxng, tag: latest }
+resources:
+  lite:     { cpus: 0.5, mem: 512m }
+  standard: { cpus: 1,   mem: 1g }
+  heavy:    { cpus: 2,   mem: 2g }
+networks: [svc, egress-web]
+requires: [valkey]
+port: 8080
+hardening: { user: "977:977", read_only: false, tmpfs: ["/tmp"] }
+secrets: [SEARXNG_SECRET]
+volumes: ["config:/etc/searxng"]
+# settings.yml generation (json format, secret_key, valkey url, outgoing proxy) lands in M2.

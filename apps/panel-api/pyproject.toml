@@ -1,0 +1,39 @@
+[project]
+name = "panel-api"
+version = "0.0.1"
+description = "FastAPI backend for Scraper Swarm web panel"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.2.0",
+    "cryptography>=42.0.0",
+    "pyyaml>=6.0.1",
+    "aiosqlite>=0.20.0",
+    "pyjwt>=2.8.0",
+    "webauthn>=2.2.0",
+    "pyotp>=2.9.0",
+    "swarmd",
+]
+
+[tool.uv.sources]
+swarmd = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/panel_api"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
