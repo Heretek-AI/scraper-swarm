@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from panel_api.db import Database
-from panel_api.routers import agents, auth, services
+from panel_api.routers import agents, auth, security, services
 from panel_api.swarmd_client import SwarmdClient
 from panel_api.vault import Vault
 from swarmd.catalog import ServiceEntry, load_catalog
@@ -76,6 +76,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(services.router)
     app.include_router(agents.router)
+    app.include_router(security.router)
 
     return app
 

@@ -149,3 +149,13 @@ async def test_full_wizard_and_auth_workflow(client_and_ctx):
 
     r = await client.get("/agents/keys")
     assert len(r.json()) == 0
+
+    # 12. Verify Security Posture score and checks
+    r = await client.get("/security/posture")
+    assert r.status_code == 200
+    posture = r.json()
+    assert posture["score"] >= 80
+    assert posture["admin_2fa_enforced"] is True
+    assert posture["egress_default_deny"] is True
+    assert posture["audit_chain_valid"] is True
+    assert len(posture["details"]) > 0

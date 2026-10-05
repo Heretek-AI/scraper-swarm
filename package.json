@@ -5,5 +5,10 @@
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test"
+  },
+  "pnpm": {
+    "overrides": {
+      "braces": ">=3.0.3"
+    }
   }
 }

@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
   server: {
@@ -15,6 +15,7 @@ export default defineConfig({
       "/auth": "http://localhost:8000",
       "/services": "http://localhost:8000",
       "/agents": "http://localhost:8000",
+      "/security": "http://localhost:8000",
     },
   },
 });
