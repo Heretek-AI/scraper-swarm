@@ -53,7 +53,8 @@ def get_db(response: Response) -> Database:
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; frame-ancestors 'none'; object-src 'none';"
+        "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'; object-src 'none';"
     )
     # Inject via app state in real runtime
     from panel_api.main import app_state
@@ -65,24 +66,53 @@ def get_vault() -> Vault:
     return app_state.vault
 
 
-def get_current_user(
+async def get_current_user(
     swarm_session: Annotated[str | None, Cookie()] = None,
 ) -> SessionInfo:
-    if not swarm_session or swarm_session not in SESSIONS:
+    if not swarm_session:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
         )
-    data = SESSIONS[swarm_session]
-    return SessionInfo(
-        user_id=data["user_id"],
-        username=data["username"],
-        role=data["role"],  # type: ignore
+    if swarm_session in SESSIONS:
+        data = SESSIONS[swarm_session]
+        return SessionInfo(
+            user_id=data["user_id"],
+            username=data["username"],
+            role=data["role"],  # type: ignore
+        )
+
+    # Check persistent database
+    from panel_api.main import app_state
+    if app_state and app_state.db and app_state.db.conn:
+        try:
+            async with app_state.db.conn.execute(
+                "SELECT user_id, username, role FROM sessions WHERE token = ?",
+                (swarm_session,),
+            ) as cur:
+                row = await cur.fetchone()
+                if row:
+                    SESSIONS[swarm_session] = {
+                        "user_id": row["user_id"],
+                        "username": row["username"],
+                        "role": row["role"],
+                    }
+                    return SessionInfo(
+                        user_id=row["user_id"],
+                        username=row["username"],
+                        role=row["role"],  # type: ignore
+                    )
+        except Exception:
+            pass
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required",
     )
 
 
 def require_role(*allowed_roles: str):
-    def _role_checker(user: SessionInfo = Depends(get_current_user)) -> SessionInfo:
+    async def _role_checker(user: SessionInfo = Depends(get_current_user)) -> SessionInfo:
         if user.role not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -192,6 +222,12 @@ async def verify_totp(
         "role": row["role"],
     }
 
+    await db.conn.execute(
+        "INSERT OR REPLACE INTO sessions (token, user_id, username, role) VALUES (?, ?, ?, ?)",
+        (session_token, user_id, row["username"], row["role"]),
+    )
+    await db.conn.commit()
+
     # Strict HttpOnly, SameSite=Strict session cookie
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
@@ -212,9 +248,16 @@ async def verify_totp(
 async def logout(
     response: Response,
     swarm_session: Annotated[str | None, Cookie()] = None,
+    db: Database = Depends(get_db),
 ):
-    if swarm_session and swarm_session in SESSIONS:
-        del SESSIONS[swarm_session]
+    if swarm_session:
+        if swarm_session in SESSIONS:
+            del SESSIONS[swarm_session]
+        try:
+            await db.conn.execute("DELETE FROM sessions WHERE token = ?", (swarm_session,))
+            await db.conn.commit()
+        except Exception:
+            pass
     response.delete_cookie(key=SESSION_COOKIE_NAME, httponly=True, samesite="strict", secure=True)
     return {"ok": True}
 

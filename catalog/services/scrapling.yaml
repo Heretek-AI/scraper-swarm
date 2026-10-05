@@ -13,4 +13,18 @@ resources:
 networks: [svc, egress-web]
 port: 8000
 hardening: { user: "1000:1000", seccomp: chromium, tmpfs: ["/tmp"] }
+secrets: [PROXY_PASSWORD]
 native_exposable: true
+params_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    stealth_engine: { type: string, enum: ["camoufox", "playwright"] }
+    headless: { type: boolean }
+    network_timeout: { type: integer, minimum: 5, maximum: 120 }
+    upstream_proxy: { type: string }
+param_env:
+  stealth_engine: SCRAPLING_ENGINE
+  headless: SCRAPLING_HEADLESS
+  network_timeout: SCRAPLING_TIMEOUT
+  upstream_proxy: HTTP_PROXY

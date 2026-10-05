@@ -131,7 +131,11 @@ def render_stack(
     used = {n for s in services.values() for n in s["networks"]}
     networks: dict[str, Any] = {}
     for net in sorted(used):
-        networks[net] = {} if net == "egress-out" else {"internal": True}
+        networks[net] = (
+            {"name": f"swarm-{net}"}
+            if net == "egress-out"
+            else {"internal": True, "name": f"swarm-{net}"}
+        )
 
     compose: dict[str, Any] = {"name": PROJECT, "services": services, "networks": networks}
     if volumes:

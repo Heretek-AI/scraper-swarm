@@ -74,8 +74,12 @@ async def test_full_wizard_and_auth_workflow(client_and_ctx):
     assert r.status_code == 200
     assert r.json() == {"setup_completed": False}
 
-    # 2. Try unauthenticated call to catalog -> 401
-    r = await client.get("/services/catalog")
+    # 2. Try unauthenticated calls -> 401
+    r = await client.get("/services/installed")
+    assert r.status_code == 401
+    r = await client.get("/services/status")
+    assert r.status_code == 401
+    r = await client.get("/services/compose")
     assert r.status_code == 401
 
     # 3. Bootstrap init admin

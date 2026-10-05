@@ -77,3 +77,10 @@ class DockerOrchestrator:
     async def get_logs(self, service_name: str, lines: int = 100) -> str:
         """Safely fetches logs for a specific service."""
         return await self._run_command(["logs", "--tail", str(lines), service_name])
+
+    def get_compose_content(self) -> str:
+        """Returns the raw YAML content of docker-compose.yml if present."""
+        if not self.compose_file.exists():
+            return ""
+        return self.compose_file.read_text(encoding="utf-8")
+

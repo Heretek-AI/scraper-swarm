@@ -15,3 +15,14 @@ port: 9222
 hardening: { user: "1000:1000", seccomp: chromium }
 secrets: [CLOAKBROWSER_LICENSE_KEY]
 native_exposable: false
+params_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    release_channel: { type: string, enum: ["stable", "preview"] }
+    humanize: { type: boolean }
+    concurrency_limit: { type: integer, minimum: 1, maximum: 10 }
+param_env:
+  release_channel: CLOAKBROWSER_RELEASE_CHANNEL
+  humanize: CLOAKBROWSER_HUMANIZE
+  concurrency_limit: CLOAKBROWSER_CONCURRENCY

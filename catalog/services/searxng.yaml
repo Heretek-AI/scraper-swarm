@@ -16,4 +16,17 @@ port: 8080
 hardening: { user: "977:977", read_only: false, tmpfs: ["/tmp"] }
 secrets: [SEARXNG_SECRET]
 volumes: ["config:/etc/searxng"]
-# settings.yml generation (json format, secret_key, valkey url, outgoing proxy) lands in M2.
+native_exposable: false
+params_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    search_language: { type: string, pattern: "^[a-zA-Z_-]{2,10}$" }
+    safe_search: { type: integer, minimum: 0, maximum: 2 }
+    autocomplete: { type: string, enum: ["google", "duckduckgo", "brave", "none"] }
+    base_url: { type: string, format: "uri" }
+param_env:
+  search_language: SEARXNG_DEFAULT_LANG
+  safe_search: SEARXNG_SAFE_SEARCH
+  autocomplete: SEARXNG_AUTOCOMPLETE
+  base_url: SEARXNG_BASE_URL

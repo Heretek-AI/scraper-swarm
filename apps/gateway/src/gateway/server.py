@@ -193,6 +193,28 @@ def create_gateway_app() -> FastAPI:
                                 "required": ["url"],
                             },
                         },
+                        {
+                            "name": "deep_research",
+                            "description": "Conduct autonomous deep web research and synthesis using GPT Researcher.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {"type": "string", "description": "Research question or topic"},
+                                },
+                                "required": ["query"],
+                            },
+                        },
+                        {
+                            "name": "stealth_scrape",
+                            "description": "Extract content from anti-bot protected sites using Scrapling Camoufox stealth engine.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "url": {"type": "string", "description": "Target webpage URL"},
+                                },
+                                "required": ["url"],
+                            },
+                        },
                     ]
                 },
             }
@@ -218,6 +240,38 @@ def create_gateway_app() -> FastAPI:
                 target_url = args.get("url", "")
                 await log_agent_activity(agent["name"], "fetch_page", target=target_url)
                 result = await fetch_page(url=target_url)
+                return {
+                    "jsonrpc": "2.0",
+                    "id": rpc_id,
+                    "result": {"content": [{"type": "text", "text": result}]},
+                }
+
+            elif name == "deep_research":
+                await verify_agent_token(authorization, required_scope="search")
+                q = args.get("query", "")
+                await log_agent_activity(agent["name"], "deep_research", target=q)
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    try:
+                        r = await client.post("http://gpt-researcher:8000/research", json={"query": q})
+                        result = r.text
+                    except Exception as e:
+                        result = f"GPT Researcher error: {e}"
+                return {
+                    "jsonrpc": "2.0",
+                    "id": rpc_id,
+                    "result": {"content": [{"type": "text", "text": result}]},
+                }
+
+            elif name == "stealth_scrape":
+                await verify_agent_token(authorization, required_scope="scrape")
+                target_url = args.get("url", "")
+                await log_agent_activity(agent["name"], "stealth_scrape", target=target_url)
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    try:
+                        r = await client.post("http://scrapling:8000/fetch", json={"url": target_url})
+                        result = r.text
+                    except Exception as e:
+                        result = f"Scrapling error: {e}"
                 return {
                     "jsonrpc": "2.0",
                     "id": rpc_id,

@@ -12,4 +12,22 @@ resources:
 networks: [svc, egress-web]
 port: 3002
 hardening: { user: "1000:1000", seccomp: chromium }
+secrets: [TEST_API_KEY, OPENAI_API_KEY, BULL_AUTH_KEY]
 native_exposable: false
+params_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    use_db_authentication: { type: boolean }
+    num_workers_per_queue: { type: integer, minimum: 1, maximum: 32 }
+    crawl_concurrent_requests: { type: integer, minimum: 1, maximum: 50 }
+    model_name: { type: string }
+    searxng_endpoint: { type: string }
+    logging_level: { type: string, enum: ["info", "warn", "error", "debug"] }
+param_env:
+  use_db_authentication: USE_DB_AUTHENTICATION
+  num_workers_per_queue: NUM_WORKERS_PER_QUEUE
+  crawl_concurrent_requests: CRAWL_CONCURRENT_REQUESTS
+  model_name: MODEL_NAME
+  searxng_endpoint: SEARXNG_ENDPOINT
+  logging_level: LOGGING_LEVEL

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import secrets
 from typing import Any
 
 from .catalog import ServiceEntry
@@ -98,6 +99,7 @@ class SwarmdServer:
             return {"compose": compose}
         elif intent == "apply_stack":
             wanted_raw = payload.get("wanted", {})
+            secrets_payload = payload.get("secrets", {})
             wanted = {
                 sid: Selection(
                     profile=data.get("profile", "standard"),
@@ -105,6 +107,50 @@ class SwarmdServer:
                 )
                 for sid, data in wanted_raw.items()
             }
+
+            # 1. Ensure seccomp profile directory and chromium.json exist
+            seccomp_dir = self.stack_dir / "seccomp"
+            seccomp_dir.mkdir(parents=True, exist_ok=True)
+            chromium_seccomp = seccomp_dir / "chromium.json"
+            if not chromium_seccomp.exists():
+                chromium_seccomp.write_text(
+                    json.dumps(
+                        {
+                            "defaultAction": "SCMP_ACT_ALLOW",
+                            "architectures": [
+                                "SCMP_ARCH_X86_64",
+                                "SCMP_ARCH_X86",
+                                "SCMP_ARCH_X32",
+                                "SCMP_ARCH_ARM",
+                                "SCMP_ARCH_AARCH64",
+                            ],
+                            "syscalls": [],
+                        },
+                        indent=2,
+                    )
+                    + "\n"
+                )
+                chromium_seccomp.chmod(0o644)
+
+            # 2. Ensure env directory and env files for services with secrets exist
+            env_dir = self.stack_dir / "env"
+            env_dir.mkdir(parents=True, exist_ok=True)
+            for sid, entry in self.catalog.items():
+                if entry.secrets:
+                    env_file = env_dir / f"{sid}.env"
+                    service_secrets = secrets_payload.get(sid, {})
+                    lines = []
+                    for s_name in entry.secrets:
+                        val = service_secrets.get(s_name)
+                        if not val:
+                            if any(k in s_name for k in ("SECRET", "TOKEN", "KEY")):
+                                val = secrets.token_hex(32)
+                            else:
+                                val = ""
+                        lines.append(f"{s_name}={val}\n")
+                    env_file.write_text("".join(lines))
+                    env_file.chmod(0o600)
+
             compose = render_stack(
                 self.catalog,
                 wanted,
@@ -126,6 +172,9 @@ class SwarmdServer:
                 raise ValueError("Missing 'service' in payload for get_logs")
             logs = await self.orchestrator.get_logs(service, lines=payload.get("lines", 100))
             return {"logs": logs}
+        elif intent == "get_compose":
+            content = self.orchestrator.get_compose_content()
+            return {"compose_yaml": content}
         elif intent == "ping":
             return {"status": "pong"}
         else:

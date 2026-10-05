@@ -13,5 +13,14 @@ resources:
 networks: [svc, egress-web]
 port: 8501
 hardening: { user: "1000:1000", tmpfs: ["/tmp"] }
-secrets: [OPENAI_API_KEY]
+secrets: [OPENAI_API_KEY, GEMINI_API_KEY]
 native_exposable: false
+params_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    model_provider: { type: string, enum: ["openai", "gemini", "ollama"] }
+    default_model: { type: string }
+param_env:
+  model_provider: MODEL_PROVIDER
+  default_model: DEFAULT_MODEL
