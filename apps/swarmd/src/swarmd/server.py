@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import ServiceEntry
+from .docker_engine import DockerOrchestrator
 from .render import Selection, render_stack
 
 logger = logging.getLogger("swarmd.server")
@@ -30,6 +31,7 @@ class SwarmdServer:
         self.stack_dir = stack_dir
         self.repo_root = repo_root
         self.allow_draft = allow_draft
+        self.orchestrator = DockerOrchestrator(stack_dir=stack_dir)
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -94,6 +96,36 @@ class SwarmdServer:
                 allow_draft=self.allow_draft,
             )
             return {"compose": compose}
+        elif intent == "apply_stack":
+            wanted_raw = payload.get("wanted", {})
+            wanted = {
+                sid: Selection(
+                    profile=data.get("profile", "standard"),
+                    params=data.get("params", {}),
+                )
+                for sid, data in wanted_raw.items()
+            }
+            compose = render_stack(
+                self.catalog,
+                wanted,
+                self.stack_dir,
+                self.repo_root,
+                allow_draft=self.allow_draft,
+            )
+            output = await self.orchestrator.write_and_apply(compose)
+            return {"compose": compose, "output": output}
+        elif intent == "down_stack":
+            output = await self.orchestrator.down()
+            return {"output": output}
+        elif intent == "get_ps":
+            containers = await self.orchestrator.get_ps()
+            return {"containers": containers}
+        elif intent == "get_logs":
+            service = payload.get("service")
+            if not service:
+                raise ValueError("Missing 'service' in payload for get_logs")
+            logs = await self.orchestrator.get_logs(service, lines=payload.get("lines", 100))
+            return {"logs": logs}
         elif intent == "ping":
             return {"status": "pong"}
         else:

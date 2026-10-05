@@ -1,0 +1,24 @@
+FROM python:3.12-slim
+WORKDIR /opt/scraper-swarm
+
+# Install Docker CLI to execute isolated compose operations
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates gnupg build-essential && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
+    chmod a+r /etc/apt/keyrings/docker.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+COPY pyproject.toml uv.lock ./
+COPY apps/swarmd ./apps/swarmd
+
+RUN uv sync --package swarmd
+
+ENV PATH="/opt/scraper-swarm/.venv/bin:$PATH"
+
+CMD ["python3", "-c", "import asyncio; from pathlib import Path; from swarmd.catalog import load_catalog; from swarmd.server import SwarmdServer; catalog = load_catalog(Path('/opt/scraper-swarm/catalog/services')); server = SwarmdServer(Path('/var/lib/scraper-swarm/swarmd.sock'), catalog, Path('/var/lib/scraper-swarm/stack'), Path('/opt/scraper-swarm'), allow_draft=True); loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop); loop.run_until_complete(server.start()); loop.run_forever()"]

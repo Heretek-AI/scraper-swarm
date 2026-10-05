@@ -1,0 +1,89 @@
+# Scraper Swarm — Production Control Plane Compose
+# Deploys Caddy Edge Proxy, Panel API, Swarmd Privileged Sidecar, Gateway, and Egress SSRF Guard
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../apps/panel-web/dist:/var/www/panel-web:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+    depends_on:
+      - panel-api
+      - gateway
+
+  panel-api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.panel-api
+    restart: unless-stopped
+    environment:
+      - SWARM_DATA_DIR=/var/lib/scraper-swarm
+      - SWARM_REPO_ROOT=/opt/scraper-swarm
+    volumes:
+      - swarm_data:/var/lib/scraper-swarm
+      - ..:/opt/scraper-swarm:ro
+    networks:
+      - edge
+      - control
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    restart: unless-stopped
+    environment:
+      - SWARM_DB_PATH=/var/lib/scraper-swarm/panel.db
+      - SEARXNG_URL=http://searxng:8080
+      - CRAWL4AI_URL=http://crawl4ai:11235
+    volumes:
+      - swarm_data:/var/lib/scraper-swarm:ro
+    networks:
+      - edge
+      - svc
+
+  swarmd:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.swarmd
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - swarm_data:/var/lib/scraper-swarm
+      - ..:/opt/scraper-swarm:ro
+    networks:
+      - control
+
+  egress-web:
+    image: scraper-swarm/egress-web:local
+    restart: unless-stopped
+    networks:
+      - svc
+      - egress-out
+
+networks:
+  edge:
+    name: swarm-edge
+  control:
+    name: swarm-control
+    internal: true
+  svc:
+    name: swarm-svc
+    internal: true
+  egress-out:
+    name: swarm-egress-out
+
+volumes:
+  swarm_data:
+    name: scraper_swarm_data
+  caddy_data:
+    name: scraper_caddy_data
+  caddy_config:
+    name: scraper_caddy_config

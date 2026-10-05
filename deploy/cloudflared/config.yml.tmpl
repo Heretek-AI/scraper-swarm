@@ -1,0 +1,15 @@
+# Cloudflare Tunnel Configuration Template (Zero-Open-Ports Alternative)
+# tunnel: <YOUR-TUNNEL-UUID>
+# credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  # Route MCP Gateway
+  - hostname: mcp.yourdomain.com
+    service: http://gateway:8000
+
+  # Route Web Panel Console
+  - hostname: swarm.yourdomain.com
+    service: http://caddy:80
+
+  # Catch-all rule
+  - service: http_status:404
