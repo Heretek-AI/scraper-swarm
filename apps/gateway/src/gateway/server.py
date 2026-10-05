@@ -133,7 +133,13 @@ async def verify_agent_token(
 
 @mcp_server.tool(name="web_search", description="Search the web using SearXNG meta-search engine.")
 async def web_search(query: str, limit: int = 5) -> str:
-    """Performs web search via SearXNG JSON endpoint."""
+    """Performs web search via SearXNG JSON endpoint.
+
+    P1 Live Engine Stack Smoke Test (Phase 01-live-smoke): live path
+    Agent -> /mcp -> SearXNG -> Smokescreen -> Internet.
+    Evidence: scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2,
+    walkthrough.md::smoke-3-3, workbench_fix_walkthrough.md::mcp-proof.
+    """
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.get(
@@ -159,7 +165,15 @@ async def web_search(query: str, limit: int = 5) -> str:
     description="Scrape and extract markdown content from a webpage using Crawl4AI.",
 )
 async def fetch_page(url: str) -> str:
-    """Scrapes a URL using Crawl4AI REST endpoint."""
+    """Scrapes a URL using Crawl4AI REST endpoint.
+
+    P1 Live Engine Stack Smoke Test (Phase 01-live-smoke): live path
+    Agent -> /mcp -> Crawl4AI -> Smokescreen -> Internet. SSRF is delegated
+    fail-closed to Smokescreen (CRAWL4AI_ALLOW_INTERNAL_URLS=true in the
+    catalog; the renderer forces HTTP(S)_PROXY=http://egress-web:4750).
+    Evidence: scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2,
+    walkthrough.md::smoke-3-3, workbench_fix_walkthrough.md::mcp-proof.
+    """
     async with httpx.AsyncClient(timeout=45.0) as client:
         try:
             # 1. Try Crawl4AI /md endpoint
@@ -263,8 +277,7 @@ def create_gateway_app() -> FastAPI:
                         {
                             "name": "fetch_page",
                             "description": (
-                                "Scrape and extract markdown content from a "
-                                "webpage using Crawl4AI."
+                                "Scrape and extract markdown content from a webpage using Crawl4AI."
                             ),
                             "inputSchema": {
                                 "type": "object",
