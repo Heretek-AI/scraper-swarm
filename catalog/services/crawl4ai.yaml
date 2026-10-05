@@ -12,6 +12,8 @@ networks: [svc, egress-web]
 port: 11235
 hardening: { user: "999:999", seccomp: chromium }
 secrets: [CRAWL4AI_API_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY, GROQ_API_KEY]
+env:
+  CRAWL4AI_ALLOW_INTERNAL_URLS: "true"
 native_exposable: true
 params_schema:
   type: object

@@ -30,6 +30,7 @@ services:
       - SWARM_BOOTSTRAP_TOKEN
     volumes:
       - swarm_data:/var/lib/scraper-swarm
+      - ../catalog:/opt/scraper-swarm/catalog:ro
     networks:
       - edge
       - control
@@ -60,6 +61,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - swarm_data:/var/lib/scraper-swarm
+      - ../catalog:/opt/scraper-swarm/catalog:ro
     networks:
       - control
 

@@ -20,6 +20,8 @@ interface WorkbenchViewProps {
   onRevokeKey: (id: string) => Promise<void>;
 }
 
+type McpToolType = "web_search" | "fetch_page" | "deep_research" | "stealth_scrape";
+
 export const WorkbenchView: React.FC<WorkbenchViewProps> = ({
   authenticated,
   agentKeys,
@@ -28,7 +30,7 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({
   onRevokeKey,
 }) => {
   // MCP Playground states
-  const [tool, setTool] = useState<"search" | "scrape">("search");
+  const [tool, setTool] = useState<McpToolType>("web_search");
   const [query, setQuery] = useState<string>("open source search cluster architecture");
   const [url, setUrl] = useState<string>("https://example.com");
   const [executing, setExecuting] = useState<boolean>(false);
@@ -46,16 +48,48 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({
     setExecuting(true);
     setOutput(null);
     try {
-      const endpoint = tool === "search" ? "/search" : "/scrape";
-      const payload = tool === "search" ? { query } : { url };
+      const isSearchOrResearch = tool === "web_search" || tool === "deep_research";
+      const args: Record<string, any> = isSearchOrResearch
+        ? (tool === "web_search" ? { query, limit: 5 } : { query })
+        : { url };
 
-      const res = await fetch(endpoint, {
+      const res = await fetch("/mcp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        credentials: "same-origin",
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: Date.now(),
+          method: "tools/call",
+          params: {
+            name: tool,
+            arguments: args,
+          },
+        }),
       });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        let errMsg = `HTTP ${res.status}: ${res.statusText}`;
+        try {
+          const errJson = JSON.parse(errorText);
+          if (errJson.detail) errMsg = `HTTP ${res.status}: ${errJson.detail}`;
+          else if (errJson.error?.message) errMsg = `RPC Error: ${errJson.error.message}`;
+        } catch {
+          if (errorText) errMsg = `HTTP ${res.status}: ${errorText}`;
+        }
+        setOutput(errMsg);
+        return;
+      }
+
       const data = await res.json();
-      setOutput(JSON.stringify(data, null, 2));
+      if (data.error) {
+        setOutput(`RPC Error (${data.error.code}): ${data.error.message}`);
+      } else if (data.result?.content?.[0]?.text) {
+        setOutput(data.result.content[0].text);
+      } else {
+        setOutput(JSON.stringify(data, null, 2));
+      }
     } catch (e: any) {
       setOutput(`Execution error: ${e.message}`);
     } finally {
@@ -112,29 +146,59 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({
               </div>
 
               {/* Tool Picker */}
-              <div className="flex items-center space-x-2 p-1 rounded-lg bg-secondary/30 border border-border text-xs">
+              <div className="grid grid-cols-2 gap-1.5 p-1 rounded-lg bg-secondary/30 border border-border text-xs">
                 <button
-                  onClick={() => setTool("search")}
-                  className={`flex-1 py-1.5 rounded-md font-semibold transition-all ${
-                    tool === "search" ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground"
+                  type="button"
+                  onClick={() => setTool("web_search")}
+                  className={`py-1.5 px-2 rounded-md font-semibold transition-all text-center truncate ${
+                    tool === "web_search"
+                      ? "bg-primary text-primary-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  deep_research (SearXNG)
+                  web_search (SearXNG)
                 </button>
                 <button
-                  onClick={() => setTool("scrape")}
-                  className={`flex-1 py-1.5 rounded-md font-semibold transition-all ${
-                    tool === "scrape" ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground"
+                  type="button"
+                  onClick={() => setTool("fetch_page")}
+                  className={`py-1.5 px-2 rounded-md font-semibold transition-all text-center truncate ${
+                    tool === "fetch_page"
+                      ? "bg-primary text-primary-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  stealth_scrape (Crawl4AI)
+                  fetch_page (Crawl4AI)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTool("deep_research")}
+                  className={`py-1.5 px-2 rounded-md font-semibold transition-all text-center truncate ${
+                    tool === "deep_research"
+                      ? "bg-primary text-primary-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  deep_research (GPT)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTool("stealth_scrape")}
+                  className={`py-1.5 px-2 rounded-md font-semibold transition-all text-center truncate ${
+                    tool === "stealth_scrape"
+                      ? "bg-primary text-primary-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  stealth_scrape (Scrapling)
                 </button>
               </div>
 
               {/* Tool Inputs */}
-              {tool === "search" ? (
+              {(tool === "web_search" || tool === "deep_research") ? (
                 <div>
-                  <label className="text-muted-foreground block text-[11px] mb-1">Search Query</label>
+                  <label className="text-muted-foreground block text-[11px] mb-1">
+                    {tool === "web_search" ? "Search Query" : "Research Query / Topic"}
+                  </label>
                   <input
                     type="text"
                     value={query}
@@ -162,7 +226,7 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({
                 className="w-full py-2 bg-primary text-primary-foreground font-semibold text-xs rounded-lg hover:bg-primary/90 transition-all flex items-center justify-center gap-1.5 shadow-md shadow-primary/20 disabled:opacity-50"
               >
                 <Play className={`h-3.5 w-3.5 ${executing ? "animate-pulse" : ""}`} />
-                <span>{executing ? "Invoking MCP Gateway..." : `Execute ${tool === "search" ? "deep_research" : "stealth_scrape"}`}</span>
+                <span>{executing ? "Invoking MCP Gateway..." : `Execute ${tool}`}</span>
               </button>
             </div>
 

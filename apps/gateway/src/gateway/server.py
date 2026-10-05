@@ -10,7 +10,7 @@ from typing import Any
 
 import aiosqlite
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi import Cookie, FastAPI, Header, HTTPException, Request, status
 from mcp.server.mcpserver import MCPServer
 from panel_api.audit import AuditLogger
 from pydantic import BaseModel
@@ -44,16 +44,16 @@ async def log_agent_activity(
         log.debug("Agent activity audit logging failed: %s", e)
 
 
-async def verify_agent_token(auth_header: str | None, required_scope: str) -> dict[str, Any]:
-    """Validates the Bearer token against SQLite agent_keys and checks scope."""
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid Bearer token",
-        )
-
-    raw_token = auth_header.removeprefix("Bearer ").strip()
-    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+async def verify_agent_token(
+    auth_header: str | None = None,
+    cookie_token: str | None = None,
+    required_scope: str = "search",
+) -> dict[str, Any]:
+    """Validates Bearer token against agent_keys or session cookie against sessions."""
+    # Allow scope to be passed as second positional argument if needed
+    if cookie_token in ("search", "scrape", "admin"):
+        required_scope = cookie_token
+        cookie_token = None
 
     if not os.path.exists(DB_PATH):
         raise HTTPException(
@@ -61,27 +61,74 @@ async def verify_agent_token(auth_header: str | None, required_scope: str) -> di
             detail="Database unavailable for authentication",
         )
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT id, name, scopes, rate_limit_rpm FROM agent_keys WHERE key_hash = ?",
-            (token_hash,),
-        ) as cur:
-            row = await cur.fetchone()
-            if not row:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid or revoked agent API key",
-                )
+    # 1. Bearer Token Authentication
+    if auth_header and auth_header.startswith("Bearer "):
+        raw_token = auth_header.removeprefix("Bearer ").strip()
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
-            scopes = json.loads(row["scopes"])
-            if required_scope not in scopes and "admin" not in scopes:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Key lacks required scope '{required_scope}'",
-                )
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, name, scopes, rate_limit_rpm FROM agent_keys WHERE key_hash = ?",
+                (token_hash,),
+            ) as cur:
+                row = await cur.fetchone()
+                if not row:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Invalid or revoked agent API key",
+                    )
 
-            return dict(row)
+                scopes = json.loads(row["scopes"])
+                if required_scope not in scopes and "admin" not in scopes:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"Key lacks required scope '{required_scope}'",
+                    )
+
+                return dict(row)
+
+    # 2. Session Cookie Authentication (for web panel operators / admins)
+    session_token = cookie_token
+    if not session_token and auth_header and auth_header.startswith("Session "):
+        session_token = auth_header.removeprefix("Session ").strip()
+
+    if session_token:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT user_id, username, role, expires_at FROM sessions WHERE token = ?",
+                (session_token,),
+            ) as cur:
+                row = await cur.fetchone()
+                if row:
+                    role = row["role"]
+                    if role in ("admin", "operator"):
+                        return {
+                            "id": row["user_id"],
+                            "name": row["username"],
+                            "scopes": ["admin", "search", "scrape"],
+                            "rate_limit_rpm": 600,
+                            "role": role,
+                        }
+                    elif role == "viewer":
+                        if required_scope == "search":
+                            return {
+                                "id": row["user_id"],
+                                "name": row["username"],
+                                "scopes": ["search"],
+                                "rate_limit_rpm": 60,
+                                "role": role,
+                            }
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Viewer role lacks scrape permissions",
+                        )
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required (Bearer token or session cookie)",
+    )
 
 
 @mcp_server.tool(name="web_search", description="Search the web using SearXNG meta-search engine.")
@@ -113,15 +160,26 @@ async def web_search(query: str, limit: int = 5) -> str:
 )
 async def fetch_page(url: str) -> str:
     """Scrapes a URL using Crawl4AI REST endpoint."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=45.0) as client:
         try:
+            # 1. Try Crawl4AI /md endpoint
+            resp = await client.post(
+                f"{CRAWL4AI_URL}/md",
+                json={"url": url},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict):
+                    return data.get("markdown", data.get("html", str(data)))
+                return str(data)
+
+            # 2. Fallback to /crawl endpoint
             resp = await client.post(
                 f"{CRAWL4AI_URL}/crawl",
-                json={"urls": [url], "priority": 10},
+                json={"urls": [url]},
             )
             resp.raise_for_status()
             data = resp.json()
-            # Crawl4AI typically returns task result or markdown
             if "results" in data and data["results"]:
                 first = data["results"][0]
                 return first.get("markdown", first.get("html", "No content extracted."))
@@ -150,9 +208,15 @@ def create_gateway_app() -> FastAPI:
     async def mcp_handler(
         request: Request,
         authorization: str | None = Header(None),
+        swarm_session: str | None = Cookie(None),
     ):
         """Authenticated MCP Streamable HTTP endpoint supporting JSON-RPC 2.0."""
-        agent = await verify_agent_token(authorization, required_scope="search")
+        cookie_val = swarm_session or request.cookies.get("swarm_session")
+        agent = await verify_agent_token(
+            auth_header=authorization,
+            cookie_token=cookie_val,
+            required_scope="search",
+        )
 
         body = {}
         try:
@@ -267,7 +331,11 @@ def create_gateway_app() -> FastAPI:
                 }
 
             elif name == "fetch_page":
-                await verify_agent_token(authorization, required_scope="scrape")
+                await verify_agent_token(
+                    auth_header=authorization,
+                    cookie_token=cookie_val,
+                    required_scope="scrape",
+                )
                 target_url = args.get("url", "")
                 await log_agent_activity(agent["name"], "fetch_page", target=target_url)
                 result = await fetch_page(url=target_url)
@@ -278,7 +346,11 @@ def create_gateway_app() -> FastAPI:
                 }
 
             elif name == "deep_research":
-                await verify_agent_token(authorization, required_scope="search")
+                await verify_agent_token(
+                    auth_header=authorization,
+                    cookie_token=cookie_val,
+                    required_scope="search",
+                )
                 q = args.get("query", "")
                 await log_agent_activity(agent["name"], "deep_research", target=q)
                 async with httpx.AsyncClient(timeout=120.0) as client:
@@ -296,7 +368,11 @@ def create_gateway_app() -> FastAPI:
                 }
 
             elif name == "stealth_scrape":
-                await verify_agent_token(authorization, required_scope="scrape")
+                await verify_agent_token(
+                    auth_header=authorization,
+                    cookie_token=cookie_val,
+                    required_scope="scrape",
+                )
                 target_url = args.get("url", "")
                 await log_agent_activity(agent["name"], "stealth_scrape", target=target_url)
                 async with httpx.AsyncClient(timeout=30.0) as client:
@@ -326,10 +402,17 @@ def create_gateway_app() -> FastAPI:
     @app.post("/api/search")
     async def rest_search(
         req: SearchRequest,
+        request: Request,
         authorization: str | None = Header(None),
+        swarm_session: str | None = Cookie(None),
     ):
         """REST search endpoint for direct agent querying."""
-        agent = await verify_agent_token(authorization, required_scope="search")
+        cookie_val = swarm_session or request.cookies.get("swarm_session")
+        agent = await verify_agent_token(
+            auth_header=authorization,
+            cookie_token=cookie_val,
+            required_scope="search",
+        )
         await log_agent_activity(
             agent["name"], "web_search", target=req.query, details={"limit": req.limit}
         )
@@ -339,10 +422,17 @@ def create_gateway_app() -> FastAPI:
     @app.post("/api/fetch")
     async def rest_fetch(
         req: FetchRequest,
+        request: Request,
         authorization: str | None = Header(None),
+        swarm_session: str | None = Cookie(None),
     ):
         """REST page fetch endpoint for direct agent scraping."""
-        agent = await verify_agent_token(authorization, required_scope="scrape")
+        cookie_val = swarm_session or request.cookies.get("swarm_session")
+        agent = await verify_agent_token(
+            auth_header=authorization,
+            cookie_token=cookie_val,
+            required_scope="scrape",
+        )
         await log_agent_activity(agent["name"], "fetch_page", target=req.url)
         result = await fetch_page(url=req.url)
         return {"url": req.url, "result": result}

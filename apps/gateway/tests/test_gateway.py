@@ -130,3 +130,94 @@ async def test_gateway_rest_api_and_audit(test_env):
         assert "web_search" in actions
         assert "fetch_page" in actions
 
+
+@pytest.mark.asyncio
+async def test_gateway_session_cookie_auth(test_env):
+    client, _, db = test_env
+
+    # 1. Seed an admin user and session into DB
+    admin_session_token = "sess_admin_test_token_123"
+    await db.conn.execute(
+        "INSERT INTO users (id, username, role) VALUES ('u-admin-1', 'admin_tester', 'admin')"
+    )
+    await db.conn.execute(
+        """
+        INSERT INTO sessions (token, user_id, username, role)
+        VALUES (?, 'u-admin-1', 'admin_tester', 'admin')
+        """,
+        (admin_session_token,),
+    )
+    await db.conn.commit()
+
+    # Call /mcp with swarm_session cookie
+    cookies = {"swarm_session": admin_session_token}
+    r = await client.post(
+        "/mcp",
+        cookies=cookies,
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "web_search", "arguments": {"query": "cookie test"}},
+            "id": 10,
+        },
+    )
+    assert r.status_code == 200
+    res = r.json()
+    assert "result" in res
+    assert res["result"]["content"][0]["text"] == "Mock search result for cookie test"
+
+    # Also test fetch_page with session cookie
+    r = await client.post(
+        "/mcp",
+        cookies=cookies,
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "fetch_page", "arguments": {"url": "https://example.com"}},
+            "id": 11,
+        },
+    )
+    assert r.status_code == 200
+    assert "result" in r.json()
+
+    # 2. Test viewer role: permitted for search, forbidden for scrape
+    viewer_session_token = "sess_viewer_test_token_456"
+    await db.conn.execute(
+        "INSERT INTO users (id, username, role) VALUES ('u-viewer-1', 'viewer_user', 'viewer')"
+    )
+    await db.conn.execute(
+        """
+        INSERT INTO sessions (token, user_id, username, role)
+        VALUES (?, 'u-viewer-1', 'viewer_user', 'viewer')
+        """,
+        (viewer_session_token,),
+    )
+    await db.conn.commit()
+
+    # Search should succeed for viewer
+    r = await client.post(
+        "/mcp",
+        cookies={"swarm_session": viewer_session_token},
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "web_search", "arguments": {"query": "viewer query"}},
+            "id": 12,
+        },
+    )
+    assert r.status_code == 200
+
+    # Scrape should fail with 403 Forbidden for viewer
+    r = await client.post(
+        "/mcp",
+        cookies={"swarm_session": viewer_session_token},
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "fetch_page", "arguments": {"url": "https://example.com"}},
+            "id": 13,
+        },
+    )
+    assert r.status_code == 403
+
+
