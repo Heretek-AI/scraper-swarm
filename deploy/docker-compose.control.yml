@@ -9,8 +9,8 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ../apps/panel-web/dist:/var/www/panel-web:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro,z
+      - ../apps/panel-web/dist:/var/www/panel-web:ro,z
       - caddy_data:/data
       - caddy_config:/config
     networks:
@@ -30,7 +30,6 @@ services:
       - SWARM_BOOTSTRAP_TOKEN
     volumes:
       - swarm_data:/var/lib/scraper-swarm
-      - ..:/opt/scraper-swarm:ro
     networks:
       - edge
       - control
@@ -58,7 +57,6 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - swarm_data:/var/lib/scraper-swarm
-      - ..:/opt/scraper-swarm:ro
     networks:
       - control
 
