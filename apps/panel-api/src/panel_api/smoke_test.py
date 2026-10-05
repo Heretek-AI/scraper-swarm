@@ -6,6 +6,7 @@ import asyncio
 import os
 import time
 from typing import Any
+
 import httpx
 
 
@@ -30,11 +31,18 @@ class SmokeTestRunner:
                     "message": f"Status {r1.status_code}",
                 })
             except Exception as e:
-                checks.append({"name": "HTTP Container Reachability", "passed": False, "message": str(e)})
+                checks.append({
+                    "name": "HTTP Container Reachability",
+                    "passed": False,
+                    "message": str(e),
+                })
 
             # 2. JSON Search Execution
             try:
-                r2 = await client.get(f"{base_url}/search", params={"q": "Scraper Swarm", "format": "json"})
+                r2 = await client.get(
+                    f"{base_url}/search",
+                    params={"q": "Scraper Swarm", "format": "json"},
+                )
                 passed = r2.status_code == 200 and "results" in r2.json()
                 results_count = len(r2.json().get("results", [])) if passed else 0
                 checks.append({
@@ -87,7 +95,11 @@ class SmokeTestRunner:
                     "message": f"Engine schema HTTP {r2.status_code} (Browser pool ready)",
                 })
             except Exception as e:
-                checks.append({"name": "Engine Schema & Browser Config", "passed": False, "message": str(e)})
+                checks.append({
+                    "name": "Engine Schema & Browser Config",
+                    "passed": False,
+                    "message": str(e),
+                })
 
         latency = int((time.perf_counter() - start) * 1000)
         return {
@@ -112,7 +124,11 @@ class SmokeTestRunner:
                     "message": f"Scrapling container reachable (HTTP {r.status_code})",
                 })
             except Exception as e:
-                checks.append({"name": "Camoufox Stealth Readiness", "passed": False, "message": str(e)})
+                checks.append({
+                    "name": "Camoufox Stealth Readiness",
+                    "passed": False,
+                    "message": str(e),
+                })
 
         latency = int((time.perf_counter() - start) * 1000)
         return {
@@ -137,7 +153,11 @@ class SmokeTestRunner:
                     "message": f"Agent endpoint responded (HTTP {r.status_code})",
                 })
             except Exception as e:
-                checks.append({"name": "Research Agent API Health", "passed": False, "message": str(e)})
+                checks.append({
+                    "name": "Research Agent API Health",
+                    "passed": False,
+                    "message": str(e),
+                })
 
         latency = int((time.perf_counter() - start) * 1000)
         return {
@@ -162,7 +182,11 @@ class SmokeTestRunner:
                     "message": f"Cluster responded (HTTP {r.status_code})",
                 })
             except Exception as e:
-                checks.append({"name": "Firecrawl Cluster Health", "passed": False, "message": str(e)})
+                checks.append({
+                    "name": "Firecrawl Cluster Health",
+                    "passed": False,
+                    "message": str(e),
+                })
 
         latency = int((time.perf_counter() - start) * 1000)
         return {
@@ -187,7 +211,11 @@ class SmokeTestRunner:
                     "message": f"Backend responded (HTTP {r.status_code})",
                 })
             except Exception as e:
-                checks.append({"name": "Maxun Backend & Browser Recorder", "passed": False, "message": str(e)})
+                checks.append({
+                    "name": "Maxun Backend & Browser Recorder",
+                    "passed": False,
+                    "message": str(e),
+                })
 
         latency = int((time.perf_counter() - start) * 1000)
         return {
@@ -212,7 +240,11 @@ class SmokeTestRunner:
                     "message": f"CDP responding (HTTP {r.status_code})",
                 })
             except Exception as e:
-                checks.append({"name": "Antidetect CDP Control Port", "passed": False, "message": str(e)})
+                checks.append({
+                    "name": "Antidetect CDP Control Port",
+                    "passed": False,
+                    "message": str(e),
+                })
 
         latency = int((time.perf_counter() - start) * 1000)
         return {
@@ -237,7 +269,11 @@ class SmokeTestRunner:
                     "message": f"Streamlit healthy (HTTP {r.status_code})",
                 })
             except Exception as e:
-                checks.append({"name": "CyberScraper Streamlit Engine", "passed": False, "message": str(e)})
+                checks.append({
+                    "name": "CyberScraper Streamlit Engine",
+                    "passed": False,
+                    "message": str(e),
+                })
 
         latency = int((time.perf_counter() - start) * 1000)
         return {
@@ -279,7 +315,10 @@ class SmokeTestRunner:
             writer.write(f"GET {test_key}\r\n".encode())
             await writer.drain()
             len_line = await asyncio.wait_for(reader.readline(), timeout=2.0)
-            val_line = await asyncio.wait_for(reader.readline(), timeout=2.0) if len_line.startswith(b"$") else b""
+            if len_line.startswith(b"$"):
+                val_line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            else:
+                val_line = b""
             passed_rw = set_res.strip() == b"+OK" and val_line.strip() == b"ok"
             checks.append({
                 "name": "Key-Value Read/Write",
@@ -290,7 +329,11 @@ class SmokeTestRunner:
             writer.close()
             await writer.wait_closed()
         except Exception as e:
-            checks.append({"name": "TCP Connectivity & PING", "passed": False, "message": str(e)})
+            checks.append({
+                "name": "TCP Connectivity & PING",
+                "passed": False,
+                "message": str(e),
+            })
 
         latency = int((time.perf_counter() - start) * 1000)
         return {
@@ -370,6 +413,12 @@ class SmokeTestRunner:
                 "service_id": service_id,
                 "passed": False,
                 "latency_ms": 0,
-                "checks": [{"name": "Diagnostic", "passed": False, "message": f"No test defined for {service_id}"}],
+                "checks": [
+                    {
+                        "name": "Diagnostic",
+                        "passed": False,
+                        "message": f"No test defined for {service_id}",
+                    }
+                ],
             }
         return await tester()

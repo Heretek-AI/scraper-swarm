@@ -9,12 +9,12 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from swarmd.catalog import ServiceEntry, load_catalog
 
 from panel_api.db import Database
 from panel_api.routers import agents, auth, security, services
 from panel_api.swarmd_client import SwarmdClient
 from panel_api.vault import Vault
-from swarmd.catalog import ServiceEntry, load_catalog
 
 
 @dataclass

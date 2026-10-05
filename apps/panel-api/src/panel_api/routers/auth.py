@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
-import os
+import logging
 import secrets
 from typing import Annotated, Literal
 
 import pyotp
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
-from pydantic import BaseModel, Field
-
 from panel_api.audit import AuditLogger
 from panel_api.db import Database
 from panel_api.vault import Vault
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -54,7 +54,8 @@ def get_db(response: Response) -> Database:
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'; object-src 'none';"
+        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; "
+        "frame-ancestors 'none'; object-src 'none';"
     )
     # Inject via app state in real runtime
     from panel_api.main import app_state
@@ -102,8 +103,8 @@ async def get_current_user(
                         username=row["username"],
                         role=row["role"],  # type: ignore
                     )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Database session lookup error: %s", e)
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -124,7 +125,9 @@ def require_role(*allowed_roles: str):
 
 @router.get("/status")
 async def get_auth_status(db: Database = Depends(get_db)):
-    async with db.conn.execute("SELECT value FROM system_state WHERE key = ?", (SETUP_COMPLETED_KEY,)) as cur:
+    async with db.conn.execute(
+        "SELECT value FROM system_state WHERE key = ?", (SETUP_COMPLETED_KEY,)
+    ) as cur:
         row = await cur.fetchone()
         is_completed = bool(row and row["value"] == "true")
     return {"setup_completed": is_completed}
@@ -137,11 +140,15 @@ async def bootstrap_init(
     vault: Vault = Depends(get_vault),
 ):
     """Initializes the admin account using the one-time bootstrap token generated at install."""
-    async with db.conn.execute("SELECT value FROM system_state WHERE key = ?", (SETUP_COMPLETED_KEY,)) as cur:
+    async with db.conn.execute(
+        "SELECT value FROM system_state WHERE key = ?", (SETUP_COMPLETED_KEY,)
+    ) as cur:
         if await cur.fetchone():
             raise HTTPException(status_code=400, detail="Setup has already been completed.")
 
-    async with db.conn.execute("SELECT value FROM system_state WHERE key = ?", (BOOTSTRAP_STATE_KEY,)) as cur:
+    async with db.conn.execute(
+        "SELECT value FROM system_state WHERE key = ?", (BOOTSTRAP_STATE_KEY,)
+    ) as cur:
         row = await cur.fetchone()
         if not row or not secrets.compare_digest(row["value"], req.token):
             raise HTTPException(status_code=403, detail="Invalid bootstrap token.")
@@ -163,8 +170,8 @@ async def bootstrap_init(
     )
     await db.conn.commit()
 
-    logger = AuditLogger(db.conn)
-    await logger.log(
+    audit_logger = AuditLogger(db.conn)
+    await audit_logger.log(
         actor="bootstrap",
         action="admin_initialized",
         target=req.admin_username,
@@ -174,7 +181,10 @@ async def bootstrap_init(
     return SetupAdminResponse(
         totp_secret=totp_secret,
         totp_uri=totp_uri,
-        message="Scan QR code with your authenticator app, then verify with /auth/verify-totp to complete setup.",
+        message=(
+            "Scan QR code with your authenticator app, "
+            "then verify with /auth/verify-totp to complete setup."
+        ),
     )
 
 
@@ -256,8 +266,8 @@ async def logout(
         try:
             await db.conn.execute("DELETE FROM sessions WHERE token = ?", (swarm_session,))
             await db.conn.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Database session deletion failed: %s", e)
     response.delete_cookie(key=SESSION_COOKIE_NAME, httponly=True, samesite="strict", secure=True)
     return {"ok": True}
 

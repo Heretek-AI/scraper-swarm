@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import base64
 import os
 from pathlib import Path
-import pytest
-import aiosqlite
 
-from panel_api.vault import Vault, VaultError
+import pytest
 from panel_api.audit import AuditLogger
 from panel_api.db import Database
-from panel_api.swarmd_client import SwarmdClient, SwarmdClientError
+from panel_api.swarmd_client import SwarmdClient
+from panel_api.vault import Vault, VaultError
 from swarmd.catalog import load_catalog
 from swarmd.server import SwarmdServer
 
@@ -67,9 +65,9 @@ async def test_audit_logger_chain(tmp_path: Path):
     await db.connect()
 
     logger = AuditLogger(db.conn)
-    h1 = await logger.log("admin", "login", details={"ip": "127.0.0.1"})
-    h2 = await logger.log("admin", "install_service", target="searxng", details={"profile": "standard"})
-    h3 = await logger.log("operator", "restart_service", target="searxng")
+    await logger.log("admin", "login", details={"ip": "127.0.0.1"})
+    await logger.log("admin", "install_service", target="searxng", details={"profile": "standard"})
+    await logger.log("operator", "restart_service", target="searxng")
 
     assert await logger.verify_chain() is True
 

@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from typing import Any
+
 import aiosqlite
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request, Response, status
-from pydantic import BaseModel
+from fastapi import FastAPI, Header, HTTPException, Request, status
 from mcp.server.mcpserver import MCPServer
 from panel_api.audit import AuditLogger
+from pydantic import BaseModel
+
+log = logging.getLogger(__name__)
 
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://searxng:8080")
 CRAWL4AI_URL = os.environ.get("CRAWL4AI_URL", "http://crawl4ai:11235")
@@ -36,8 +40,8 @@ async def log_agent_activity(
                 target=target,
                 details=details,
             )
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("Agent activity audit logging failed: %s", e)
 
 
 async def verify_agent_token(auth_header: str | None, required_scope: str) -> dict[str, Any]:
@@ -94,13 +98,19 @@ async def web_search(query: str, limit: int = 5) -> str:
             results = data.get("results", [])[:limit]
             formatted = []
             for r in results:
-                formatted.append(f"Title: {r.get('title')}\nURL: {r.get('url')}\nSnippet: {r.get('content')}\n---")
+                formatted.append(
+                    f"Title: {r.get('title')}\nURL: {r.get('url')}\n"
+                    f"Snippet: {r.get('content')}\n---"
+                )
             return "\n".join(formatted) if formatted else "No results found."
         except Exception as e:
             return f"Error executing search on {SEARXNG_URL}: {e}"
 
 
-@mcp_server.tool(name="fetch_page", description="Scrape and extract markdown content from a webpage using Crawl4AI.")
+@mcp_server.tool(
+    name="fetch_page",
+    description="Scrape and extract markdown content from a webpage using Crawl4AI.",
+)
 async def fetch_page(url: str) -> str:
     """Scrapes a URL using Crawl4AI REST endpoint."""
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -147,8 +157,8 @@ def create_gateway_app() -> FastAPI:
         body = {}
         try:
             body = await request.json()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("Failed to parse request JSON: %s", e)
 
         method = body.get("method")
         rpc_id = body.get("id", 1)
@@ -177,36 +187,55 @@ def create_gateway_app() -> FastAPI:
                                 "type": "object",
                                 "properties": {
                                     "query": {"type": "string", "description": "Search keywords"},
-                                    "limit": {"type": "integer", "description": "Max results", "default": 5},
+                                    "limit": {
+                                        "type": "integer",
+                                        "description": "Max results",
+                                        "default": 5,
+                                    },
                                 },
                                 "required": ["query"],
                             },
                         },
                         {
                             "name": "fetch_page",
-                            "description": "Scrape and extract markdown content from a webpage using Crawl4AI.",
+                            "description": (
+                                "Scrape and extract markdown content from a "
+                                "webpage using Crawl4AI."
+                            ),
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "url": {"type": "string", "description": "Target webpage URL to crawl"},
+                                    "url": {
+                                        "type": "string",
+                                        "description": "Target webpage URL to crawl",
+                                    },
                                 },
                                 "required": ["url"],
                             },
                         },
                         {
                             "name": "deep_research",
-                            "description": "Conduct autonomous deep web research and synthesis using GPT Researcher.",
+                            "description": (
+                                "Conduct autonomous deep web research and synthesis "
+                                "using GPT Researcher."
+                            ),
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "query": {"type": "string", "description": "Research question or topic"},
+                                    "query": {
+                                        "type": "string",
+                                        "description": "Research question or topic",
+                                    },
                                 },
                                 "required": ["query"],
                             },
                         },
                         {
                             "name": "stealth_scrape",
-                            "description": "Extract content from anti-bot protected sites using Scrapling Camoufox stealth engine.",
+                            "description": (
+                                "Extract content from anti-bot protected sites using "
+                                "Scrapling Camoufox stealth engine."
+                            ),
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -227,7 +256,9 @@ def create_gateway_app() -> FastAPI:
             if name == "web_search":
                 q = args.get("query", "")
                 limit = args.get("limit", 5)
-                await log_agent_activity(agent["name"], "web_search", target=q, details={"limit": limit})
+                await log_agent_activity(
+                    agent["name"], "web_search", target=q, details={"limit": limit}
+                )
                 result = await web_search(query=q, limit=limit)
                 return {
                     "jsonrpc": "2.0",
@@ -252,7 +283,9 @@ def create_gateway_app() -> FastAPI:
                 await log_agent_activity(agent["name"], "deep_research", target=q)
                 async with httpx.AsyncClient(timeout=120.0) as client:
                     try:
-                        r = await client.post("http://gpt-researcher:8000/research", json={"query": q})
+                        r = await client.post(
+                            "http://gpt-researcher:8000/research", json={"query": q}
+                        )
                         result = r.text
                     except Exception as e:
                         result = f"GPT Researcher error: {e}"
@@ -268,7 +301,9 @@ def create_gateway_app() -> FastAPI:
                 await log_agent_activity(agent["name"], "stealth_scrape", target=target_url)
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     try:
-                        r = await client.post("http://scrapling:8000/fetch", json={"url": target_url})
+                        r = await client.post(
+                            "http://scrapling:8000/fetch", json={"url": target_url}
+                        )
                         result = r.text
                     except Exception as e:
                         result = f"Scrapling error: {e}"
@@ -295,7 +330,9 @@ def create_gateway_app() -> FastAPI:
     ):
         """REST search endpoint for direct agent querying."""
         agent = await verify_agent_token(authorization, required_scope="search")
-        await log_agent_activity(agent["name"], "web_search", target=req.query, details={"limit": req.limit})
+        await log_agent_activity(
+            agent["name"], "web_search", target=req.query, details={"limit": req.limit}
+        )
         result = await web_search(query=req.query, limit=req.limit)
         return {"query": req.query, "result": result}
 

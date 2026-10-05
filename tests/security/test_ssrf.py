@@ -11,7 +11,8 @@ And allows valid public destinations: example.com
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+import contextlib
+
 import httpx
 import pytest
 
@@ -39,15 +40,13 @@ async def running_smokescreen():
     ready = False
     for _ in range(15):
         await asyncio.sleep(1)
-        try:
+        with contextlib.suppress(Exception):
             async with httpx.AsyncClient(proxy=PROXY_URL, timeout=2.0) as client:
                 # Testing connectivity through proxy
                 resp = await client.get("http://example.com")
                 if resp.status_code == 200:
                     ready = True
                     break
-        except Exception:
-            pass
 
     yield ready
 

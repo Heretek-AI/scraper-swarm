@@ -6,8 +6,8 @@ import asyncio
 import json
 import logging
 import os
-from pathlib import Path
 import secrets
+from pathlib import Path
 from typing import Any
 
 from .catalog import ServiceEntry

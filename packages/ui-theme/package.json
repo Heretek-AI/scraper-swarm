@@ -1,0 +1,7 @@
+{
+  "name": "@scraper-swarm/ui-theme",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Theme styles for Scraper Swarm",
+  "main": "theme.css"
+}

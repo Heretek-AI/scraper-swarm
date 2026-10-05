@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import os
 from pathlib import Path
+
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
@@ -52,7 +53,8 @@ class Vault:
         mode = path.stat().st_mode & 0o777
         if mode & 0o077:
             raise VaultError(
-                f"Master key file {path} has unsafe permissions ({oct(mode)}). Must be 0600 or stricter."
+                f"Master key file {path} has unsafe permissions ({oct(mode)}). "
+                "Must be 0600 or stricter."
             )
 
         content = path.read_text().strip()

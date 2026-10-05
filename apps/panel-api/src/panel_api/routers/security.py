@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel
 
+from fastapi import APIRouter, Depends
 from panel_api.audit import AuditLogger
 from panel_api.db import Database
-from panel_api.routers.auth import require_role, SessionInfo, get_db
+from panel_api.routers.auth import SessionInfo, get_db, require_role
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/security", tags=["security"])
 

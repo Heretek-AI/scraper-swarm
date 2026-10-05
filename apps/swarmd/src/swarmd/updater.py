@@ -7,6 +7,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+
 import httpx
 
 from .docker_engine import DockerOrchestrator
@@ -57,7 +58,11 @@ class ServiceUpdater:
             await asyncio.sleep(2)
             ps = await self.orchestrator.get_ps()
             service_container = next(
-                (c for c in ps if c.get("Service") == service_id or service_id in c.get("Name", "")),
+                (
+                    c
+                    for c in ps
+                    if c.get("Service") == service_id or service_id in c.get("Name", "")
+                ),
                 None,
             )
 
@@ -67,8 +72,8 @@ class ServiceUpdater:
             state = service_container.get("State", "").lower()
             health = service_container.get("Health", "").lower()
 
-            if state in ("restarting", "dead", "exited"):
-                logger.error("Container failed with state: %s", state)
+            if state in ("restarting", "dead", "exited") or health == "unhealthy":
+                logger.error("Container failed with state: %s, health: %s", state, health)
                 break
 
             if health_url:
@@ -78,17 +83,20 @@ class ServiceUpdater:
                         if resp.status_code == 200:
                             is_healthy = True
                             break
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Health probe check to %s failed: %s", health_url, e)
             elif state == "running":
                 # If running and no specific health check, check if it stayed up
                 is_healthy = True
                 break
 
         if not is_healthy:
-            logger.warning("Service %s failed health probe. Triggering automatic rollback!", service_id)
+            logger.warning(
+                "Service %s failed health probe. Triggering automatic rollback!", service_id
+            )
             await self.orchestrator.write_and_apply(previous_compose)
-            raise UpdateError(f"Health check failed for {service_id}; rolled back to previous state.")
+            msg = f"Health check failed for {service_id}; rolled back to previous state."
+            raise UpdateError(msg)
 
         logger.info("Service %s successfully updated and verified healthy.", service_id)
         return True

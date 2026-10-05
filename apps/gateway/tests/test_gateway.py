@@ -5,10 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-import pytest
-from httpx import ASGITransport, AsyncClient
 
 import gateway.server as gw_server
+import pytest
+from httpx import ASGITransport, AsyncClient
 from panel_api.db import Database
 
 

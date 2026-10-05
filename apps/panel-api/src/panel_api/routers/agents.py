@@ -5,13 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
-from typing import Annotated
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
 
+from fastapi import APIRouter, Depends, HTTPException
 from panel_api.audit import AuditLogger
 from panel_api.db import Database
-from panel_api.routers.auth import require_role, SessionInfo, get_db
+from panel_api.routers.auth import SessionInfo, get_db, require_role
+from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -94,9 +93,11 @@ async def list_agent_keys(
     db: Database = Depends(get_db),
     user: SessionInfo = Depends(require_role("admin", "operator", "viewer")),
 ):
-    async with db.conn.execute(
-        "SELECT id, name, key_prefix, scopes, rate_limit_rpm, created_at FROM agent_keys ORDER BY created_at DESC"
-    ) as cur:
+    query = (
+        "SELECT id, name, key_prefix, scopes, rate_limit_rpm, created_at "
+        "FROM agent_keys ORDER BY created_at DESC"
+    )
+    async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
         return [
             {

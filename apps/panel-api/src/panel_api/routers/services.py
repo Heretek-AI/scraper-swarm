@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
 
+from fastapi import APIRouter, Depends, HTTPException, status
 from panel_api.audit import AuditLogger
 from panel_api.db import Database
-from panel_api.routers.auth import require_role, SessionInfo, get_db
+from panel_api.routers.auth import SessionInfo, get_db, require_role
 from panel_api.swarmd_client import SwarmdClient
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/services", tags=["services"])
 
@@ -51,7 +54,11 @@ async def list_installed(
     db: Database = Depends(get_db),
     user: SessionInfo = Depends(require_role("admin", "operator", "viewer")),
 ):
-    async with db.conn.execute("SELECT service_id, profile, status, params, updated_at FROM installed_services") as cur:
+    query = (
+        "SELECT service_id, profile, status, params, updated_at "
+        "FROM installed_services"
+    )
+    async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
         return [
             {
@@ -74,7 +81,11 @@ async def deploy_services(
 ):
     """Renders and applies a validated stack via the swarmd sidecar."""
     # Merge with currently active installed services
-    async with db.conn.execute("SELECT service_id, profile, params FROM installed_services WHERE status != 'stopped'") as cur:
+    query = (
+        "SELECT service_id, profile, params FROM installed_services "
+        "WHERE status != 'stopped'"
+    )
+    async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
         wanted_payload = {
             r["service_id"]: {"profile": r["profile"], "params": json.loads(r["params"] or "{}")}
@@ -99,15 +110,16 @@ async def deploy_services(
     for req in requests:
         await db.conn.execute(
             """
-            INSERT OR REPLACE INTO installed_services (service_id, profile, status, params, updated_at)
+            INSERT OR REPLACE INTO installed_services
+            (service_id, profile, status, params, updated_at)
             VALUES (?, ?, 'running', ?, CURRENT_TIMESTAMP)
             """,
             (req.service_id, req.profile, json.dumps(req.params)),
         )
     await db.conn.commit()
 
-    logger = AuditLogger(db.conn)
-    await logger.log(
+    audit_logger = AuditLogger(db.conn)
+    await audit_logger.log(
         actor=user.username,
         action="deploy_services",
         details={"services": [req.service_id for req in requests]},
@@ -127,10 +139,14 @@ async def get_live_services_status(
     try:
         res = await swarmd.send_intent("get_ps", {})
         containers = res.get("containers", [])
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to query get_ps from swarmd: %s", e)
 
-    async with db.conn.execute("SELECT service_id, profile, status, params, updated_at FROM installed_services") as cur:
+    query = (
+        "SELECT service_id, profile, status, params, updated_at "
+        "FROM installed_services"
+    )
+    async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
         installed_map = {r["service_id"]: dict(r) for r in rows}
 
@@ -187,11 +203,14 @@ async def tear_down_services(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    await db.conn.execute("UPDATE installed_services SET status = 'stopped', updated_at = CURRENT_TIMESTAMP")
+    query = (
+        "UPDATE installed_services SET status = 'stopped', updated_at = CURRENT_TIMESTAMP"
+    )
+    await db.conn.execute(query)
     await db.conn.commit()
 
-    logger = AuditLogger(db.conn)
-    await logger.log(actor=user.username, action="down_stack", details={"output": output})
+    audit_logger = AuditLogger(db.conn)
+    await audit_logger.log(actor=user.username, action="down_stack", details={"output": output})
 
     return {"ok": True, "output": output}
 
@@ -214,7 +233,8 @@ async def test_all_services(
 ):
     """Runs automated smoke tests across all currently running engines."""
     from panel_api.smoke_test import SmokeTestRunner
-    async with db.conn.execute("SELECT service_id FROM installed_services WHERE status != 'stopped'") as cur:
+    query = "SELECT service_id FROM installed_services WHERE status != 'stopped'"
+    async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
         services = [r["service_id"] for r in rows]
 
@@ -239,7 +259,8 @@ async def restart_service(
     user: SessionInfo = Depends(require_role("admin", "operator")),
 ):
     """Re-applies the service configuration to restart the container."""
-    async with db.conn.execute("SELECT profile, params FROM installed_services WHERE service_id = ?", (service_id,)) as cur:
+    query = "SELECT profile, params FROM installed_services WHERE service_id = ?"
+    async with db.conn.execute(query, (service_id,)) as cur:
         row = await cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Service not installed")
@@ -247,7 +268,11 @@ async def restart_service(
         params = json.loads(row["params"] or "{}")
 
     # Merge active services and re-apply
-    async with db.conn.execute("SELECT service_id, profile, params FROM installed_services WHERE status != 'stopped'") as cur:
+    query = (
+        "SELECT service_id, profile, params FROM installed_services "
+        "WHERE status != 'stopped'"
+    )
+    async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
         wanted_payload = {
             r["service_id"]: {"profile": r["profile"], "params": json.loads(r["params"] or "{}")}

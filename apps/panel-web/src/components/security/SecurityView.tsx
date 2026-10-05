@@ -1,13 +1,13 @@
 import { useState } from "react";
 import {
   ShieldCheck,
-  Lock,
   CheckCircle2,
   AlertTriangle,
   FileCheck,
   Shield,
 } from "lucide-react";
 import { SecurityPosture, AuditEntry } from "../../types";
+import { AuthRequiredCard } from "../ui/AuthRequiredCard";
 
 interface SecurityViewProps {
   authenticated: boolean;
@@ -53,24 +53,11 @@ export const SecurityView: React.FC<SecurityViewProps> = ({
       </div>
 
       {!authenticated ? (
-        <div className="p-6 rounded-xl border border-border bg-card/60 glass text-center space-y-3">
-          <div className="h-10 w-10 rounded-full bg-primary/10 border border-primary/40 flex items-center justify-center text-primary mx-auto">
-            <Lock className="h-5 w-5" />
-          </div>
-          <div className="font-semibold text-foreground text-sm uppercase">
-            Authentication Required
-          </div>
-          <p className="text-xs text-muted-foreground max-w-md mx-auto">
-            Audit logs and cryptographic posture diagnostics require verified administrator credentials.
-          </p>
-          <button
-            onClick={onOpenLogin}
-            className="px-4 py-2 bg-primary text-primary-foreground font-semibold text-xs rounded-lg hover:bg-primary/90 transition-all inline-flex items-center gap-1.5"
-          >
-            <Lock className="h-3.5 w-3.5" />
-            <span>Sign In to View Security Logs</span>
-          </button>
-        </div>
+        <AuthRequiredCard
+          description="Audit logs and cryptographic posture diagnostics require verified administrator credentials."
+          buttonText="Sign In to View Security Logs"
+          onOpenLogin={onOpenLogin}
+        />
       ) : (
         <div className="space-y-6">
           {/* Posture Score Breakdown */}

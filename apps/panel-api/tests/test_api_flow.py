@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
+
+import panel_api.main as app_main
 import pyotp
 import pytest
 from httpx import ASGITransport, AsyncClient
-
-import panel_api.main as app_main
 from panel_api.db import Database
 from panel_api.routers.auth import BOOTSTRAP_STATE_KEY, SESSIONS
 from panel_api.swarmd_client import SwarmdClient

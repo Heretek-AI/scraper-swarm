@@ -5,12 +5,10 @@ import {
   Copy,
   Check,
   RefreshCw,
-  Terminal,
-  RotateCw,
-  FlaskConical,
   Lock,
 } from "lucide-react";
 import { ContainerStatus, InstalledServiceInfo } from "../../types";
+import { ContainersTable } from "./ContainersTable";
 
 interface ContainersViewProps {
   authenticated: boolean;
@@ -139,85 +137,16 @@ export const ContainersView: React.FC<ContainersViewProps> = ({
             </button>
           </div>
 
-          {liveContainers.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-border text-muted-foreground uppercase text-[10px] tracking-wider">
-                    <th className="pb-3 font-semibold">Pod / Container</th>
-                    <th className="pb-3 font-semibold">Container ID</th>
-                    <th className="pb-3 font-semibold">Image Tag</th>
-                    <th className="pb-3 font-semibold">Status</th>
-                    <th className="pb-3 font-semibold">Ports</th>
-                    <th className="pb-3 font-semibold text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border/40 font-mono text-[11px]">
-                  {liveContainers.map((c, idx) => {
-                    const sId = c.Service || c.Name?.replace("scraper-swarm-", "") || `unknown-${idx}`;
-                    const isTesting = testingServiceId === sId;
-
-                    return (
-                      <tr key={c.ID || idx} className="hover:bg-secondary/20 transition-colors">
-                        <td className="py-3.5 pr-4 font-sans">
-                          <div className="flex items-center space-x-2.5">
-                            <span className="h-2 w-2 rounded-full bg-status-ok animate-pulse" />
-                            <span className="font-bold text-foreground uppercase tracking-wide">
-                              {sId}
-                            </span>
-                          </div>
-                        </td>
-                        <td className="py-3.5 pr-4 text-muted-foreground">
-                          {c.ID ? c.ID.substring(0, 12) : "n/a"}
-                        </td>
-                        <td className="py-3.5 pr-4 text-muted-foreground truncate max-w-xs">
-                          {c.Image}
-                        </td>
-                        <td className="py-3.5 pr-4 font-sans">
-                          <span className="px-2 py-0.5 rounded text-[10px] uppercase font-semibold bg-status-ok/10 text-status-ok border border-status-ok/30">
-                            {c.State || "running"}
-                          </span>
-                        </td>
-                        <td className="py-3.5 pr-4 text-muted-foreground">
-                          {c.Ports || "Mesh Internal"}
-                        </td>
-                        <td className="py-3.5 text-right font-sans">
-                          <div className="flex items-center justify-end space-x-2">
-                            <button
-                              onClick={() => (authenticated ? onRunSmokeTest(sId) : onOpenLogin())}
-                              disabled={isTesting}
-                              className="px-2.5 py-1 bg-secondary text-primary border border-primary/30 rounded text-[11px] hover:bg-primary/10 transition-colors flex items-center gap-1 disabled:opacity-50"
-                            >
-                              <FlaskConical className={`h-3 w-3 ${isTesting ? "animate-spin" : ""}`} />
-                              <span>Smoke Test</span>
-                            </button>
-                            <button
-                              onClick={() => (authenticated ? onOpenLogs(sId) : onOpenLogin())}
-                              className="px-2.5 py-1 bg-secondary text-foreground border border-border rounded text-[11px] hover:bg-secondary/80 transition-colors flex items-center gap-1"
-                            >
-                              <Terminal className="h-3 w-3" />
-                              <span>Logs</span>
-                            </button>
-                            <button
-                              onClick={() => (authenticated ? onRestartService(sId) : onOpenLogin())}
-                              className="px-2.5 py-1 bg-secondary text-foreground border border-border rounded text-[11px] hover:bg-secondary/80 transition-colors flex items-center gap-1"
-                            >
-                              <RotateCw className="h-3 w-3" />
-                              <span>Restart</span>
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="text-center py-10 text-muted-foreground text-xs border border-dashed border-border rounded-xl">
-              No engine containers running currently.
-            </div>
-          )}
+          <ContainersTable
+            containers={liveContainers}
+            testingServiceId={testingServiceId}
+            authenticated={authenticated}
+            showContainerId={true}
+            onRunSmokeTest={onRunSmokeTest}
+            onOpenLogs={onOpenLogs}
+            onRestartService={onRestartService}
+            onOpenLogin={onOpenLogin}
+          />
         </div>
       )}
 

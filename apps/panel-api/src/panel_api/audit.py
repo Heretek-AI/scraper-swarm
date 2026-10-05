@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Any
+
 import aiosqlite
 
 
@@ -49,9 +50,11 @@ class AuditLogger:
 
     async def verify_chain(self) -> bool:
         """Verifies the cryptographic integrity of the entire audit chain."""
-        async with self.db.execute(
-            "SELECT actor, action, target, details, prev_hash, entry_hash FROM audit_log ORDER BY id ASC"
-        ) as cursor:
+        query = (
+            "SELECT actor, action, target, details, prev_hash, entry_hash "
+            "FROM audit_log ORDER BY id ASC"
+        )
+        async with self.db.execute(query) as cursor:
             expected_prev = "GENESIS"
             async for row in cursor:
                 if row["prev_hash"] != expected_prev:

@@ -21,6 +21,20 @@ import {
   AgentKey,
 } from "./types";
 
+async function deployServicesApi(
+  payload: Array<{ service_id: string; profile: string; params: Record<string, any> }>,
+  defaultError: string
+) {
+  const res = await fetch("/services/deploy", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || defaultError);
+  return data;
+}
+
 function MainPanel() {
   const toast = useToast();
 
@@ -167,15 +181,7 @@ function MainPanel() {
   async function handleDeployService(serviceId: string, profile: string, params: Record<string, any>) {
     setDeployingService(true);
     try {
-      const payload = [{ service_id: serviceId, profile, params }];
-      const res = await fetch("/services/deploy", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Deployment failed");
-
+      await deployServicesApi([{ service_id: serviceId, profile, params }], "Deployment failed");
       toast.success(`Service ${serviceId} deployed successfully.`);
       setSelectedServiceForConfig(null);
       loadClusterData(true);
@@ -190,18 +196,13 @@ function MainPanel() {
     setDeployingCore(true);
     toast.info("Deploying core cluster (SearXNG + Crawl4AI + Valkey)...");
     try {
-      const payload = [
-        { service_id: "searxng", profile: "standard", params: {} },
-        { service_id: "crawl4ai", profile: "standard", params: {} },
-      ];
-      const res = await fetch("/services/deploy", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Stack deployment failed");
-
+      await deployServicesApi(
+        [
+          { service_id: "searxng", profile: "standard", params: {} },
+          { service_id: "crawl4ai", profile: "standard", params: {} },
+        ],
+        "Stack deployment failed"
+      );
       toast.success("Core search & extraction cluster applied and running.");
       loadClusterData(true);
     } catch (e: any) {
