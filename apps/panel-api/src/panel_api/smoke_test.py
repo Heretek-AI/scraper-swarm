@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from typing import Any
@@ -247,11 +248,64 @@ class SmokeTestRunner:
         }
 
     @staticmethod
-    async def test_egress_guard() -> dict[str, Any]:
+    async def test_valkey() -> dict[str, Any]:
+        """Validates Valkey in-memory cache and key-value operations."""
+        start = time.perf_counter()
+        checks = []
+        host = os.environ.get("VALKEY_HOST", "valkey")
+        port = int(os.environ.get("VALKEY_PORT", "6379"))
+
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=3.0
+            )
+            # 1. PING Check
+            writer.write(b"PING\r\n")
+            await writer.drain()
+            pong = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            passed_pong = pong.strip() == b"+PONG"
+            checks.append({
+                "name": "TCP Connectivity & PING",
+                "passed": passed_pong,
+                "message": f"Response {pong.decode('utf-8', errors='replace').strip()}",
+            })
+
+            # 2. Key-Value Read/Write Check
+            test_key = "swarm:smoke:health"
+            writer.write(f"SET {test_key} ok EX 10\r\n".encode())
+            await writer.drain()
+            set_res = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            
+            writer.write(f"GET {test_key}\r\n".encode())
+            await writer.drain()
+            len_line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            val_line = await asyncio.wait_for(reader.readline(), timeout=2.0) if len_line.startswith(b"$") else b""
+            passed_rw = set_res.strip() == b"+OK" and val_line.strip() == b"ok"
+            checks.append({
+                "name": "Key-Value Read/Write",
+                "passed": passed_rw,
+                "message": "Key written and verified" if passed_rw else "Failed write/read cycle",
+            })
+
+            writer.close()
+            await writer.wait_closed()
+        except Exception as e:
+            checks.append({"name": "TCP Connectivity & PING", "passed": False, "message": str(e)})
+
+        latency = int((time.perf_counter() - start) * 1000)
+        return {
+            "service_id": "valkey",
+            "passed": all(c["passed"] for c in checks),
+            "latency_ms": latency,
+            "checks": checks,
+        }
+
+    @staticmethod
+    async def test_egress_guard(service_id: str = "egress-web") -> dict[str, Any]:
         """Validates fail-closed SSRF egress protection via Smokescreen."""
         start = time.perf_counter()
         checks = []
-        proxy_url = "http://deploy-egress-web-1:4750"
+        proxy_url = os.environ.get("HTTP_PROXY", "http://egress-web:4750")
 
         # Verify proxy blocks internal/private RFC1918 and metadata addresses
         async with httpx.AsyncClient(proxy=proxy_url, timeout=5.0) as client:
@@ -289,7 +343,7 @@ class SmokeTestRunner:
 
         latency = int((time.perf_counter() - start) * 1000)
         return {
-            "service_id": "egress-guard",
+            "service_id": service_id,
             "passed": all(c["passed"] for c in checks),
             "latency_ms": latency,
             "checks": checks,
@@ -300,13 +354,15 @@ class SmokeTestRunner:
         testers = {
             "searxng": cls.test_searxng,
             "crawl4ai": cls.test_crawl4ai,
+            "valkey": cls.test_valkey,
+            "egress-web": lambda: cls.test_egress_guard("egress-web"),
+            "egress-guard": lambda: cls.test_egress_guard("egress-guard"),
             "scrapling": cls.test_scrapling,
             "gpt-researcher": cls.test_gpt_researcher,
             "firecrawl": cls.test_firecrawl,
             "maxun": cls.test_maxun,
             "cloakbrowser": cls.test_cloakbrowser,
             "cyberscraper": cls.test_cyberscraper,
-            "egress-guard": cls.test_egress_guard,
         }
         tester = testers.get(service_id)
         if not tester:

@@ -247,7 +247,8 @@ function MainPanel() {
       if (data.passed) {
         toast.success(`Smoke test passed for ${serviceId} (${data.latency_ms}ms).`);
       } else {
-        toast.error(`Smoke test failed for ${serviceId}.`);
+        const failMsg = (data.checks || []).filter(c => !c.passed).map(c => `${c.name}: ${c.message}`).join(" | ");
+        toast.error(`Smoke test failed for ${serviceId}${failMsg ? `: ${failMsg}` : ""}`);
       }
     } catch (e: any) {
       toast.error(`Smoke test request error: ${e.message}`);
