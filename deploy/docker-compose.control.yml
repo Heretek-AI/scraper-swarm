@@ -27,6 +27,7 @@ services:
     environment:
       - SWARM_DATA_DIR=/var/lib/scraper-swarm
       - SWARM_REPO_ROOT=/opt/scraper-swarm
+      - SWARM_BOOTSTRAP_TOKEN
     volumes:
       - swarm_data:/var/lib/scraper-swarm
       - ..:/opt/scraper-swarm:ro

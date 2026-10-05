@@ -42,6 +42,14 @@ async def lifespan(app: FastAPI):
     db = Database(db_path)
     await db.connect()
 
+    env_boot_token = os.environ.get("SWARM_BOOTSTRAP_TOKEN")
+    if env_boot_token:
+        await db.conn.execute(
+            "INSERT OR IGNORE INTO system_state (key, value) VALUES (?, ?)",
+            ("bootstrap_token", env_boot_token),
+        )
+        await db.conn.commit()
+
     vault = Vault.from_file(key_path, auto_create=True)
     swarmd = SwarmdClient(socket_path)
     catalog = load_catalog(repo_root / "catalog" / "services")

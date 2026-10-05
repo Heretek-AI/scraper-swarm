@@ -93,3 +93,60 @@ async def get_security_posture(
         container_capabilities_dropped=container_capabilities_dropped,
         details=details,
     )
+
+
+class AuditEntryResponse(BaseModel):
+    id: int
+    timestamp: str
+    actor: str
+    action: str
+    target: str | None = None
+    details: str
+    prev_hash: str
+    entry_hash: str
+
+
+@router.get("/audit", response_model=list[AuditEntryResponse])
+async def get_audit_logs(
+    db: Database = Depends(get_db),
+    user: SessionInfo = Depends(require_role("admin", "operator", "viewer")),
+    limit: int = 50,
+):
+    async with db.conn.execute(
+        """
+        SELECT id, timestamp, actor, action, target, details, prev_hash, entry_hash
+        FROM audit_log
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ) as cur:
+        rows = await cur.fetchall()
+        return [
+            AuditEntryResponse(
+                id=r["id"],
+                timestamp=r["timestamp"],
+                actor=r["actor"],
+                action=r["action"],
+                target=r["target"],
+                details=r["details"],
+                prev_hash=r["prev_hash"],
+                entry_hash=r["entry_hash"],
+            )
+            for r in rows
+        ]
+
+
+@router.post("/audit/verify")
+async def verify_audit_chain(
+    db: Database = Depends(get_db),
+    user: SessionInfo = Depends(require_role("admin", "operator")),
+):
+    logger = AuditLogger(db.conn)
+    valid = await logger.verify_chain()
+
+    async with db.conn.execute("SELECT COUNT(*) as cnt FROM audit_log") as cur:
+        row = await cur.fetchone()
+        cnt = row["cnt"] if row else 0
+
+    return {"valid": valid, "entries_checked": cnt}

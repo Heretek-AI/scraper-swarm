@@ -10,6 +10,7 @@ import {
   Layers,
   Copy,
   RefreshCw,
+  Shield,
 } from "lucide-react";
 
 interface ServiceItem {
@@ -28,9 +29,30 @@ interface AgentKey {
   rate_limit_rpm: number;
 }
 
+interface SecurityPosture {
+  score: number;
+  master_key_secure: boolean;
+  audit_chain_valid: boolean;
+  admin_2fa_enforced: boolean;
+  egress_default_deny: boolean;
+  container_capabilities_dropped: boolean;
+  details: string[];
+}
+
+interface AuditEntry {
+  id: number;
+  timestamp: string;
+  actor: string;
+  action: string;
+  target?: string;
+  details: string;
+  prev_hash: string;
+  entry_hash: string;
+}
+
 export default function App() {
   const [setupCompleted, setSetupCompleted] = useState<boolean | null>(null);
-  const [activeTab, setActiveTab] = useState<"dashboard" | "catalog" | "agents" | "wizard">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "catalog" | "agents" | "security" | "wizard">("dashboard");
 
   // Auth & Wizard states
   const [bootstrapToken, setBootstrapToken] = useState("");
@@ -47,6 +69,12 @@ export default function App() {
   const [newKeyName, setNewKeyName] = useState("");
   const [createdSnippet, setCreatedSnippet] = useState<string | null>(null);
   const [selectedServices] = useState<string[]>(["searxng", "crawl4ai"]);
+
+  // Security Posture & Audit states
+  const [securityPosture, setSecurityPosture] = useState<SecurityPosture | null>(null);
+  const [auditLogs, setAuditLogs] = useState<AuditEntry[]>([]);
+  const [chainVerificationResult, setChainVerificationResult] = useState<{ valid: boolean; entries_checked: number } | null>(null);
+  const [verifyingChain, setVerifyingChain] = useState(false);
 
   useEffect(() => {
     checkStatus();
@@ -65,6 +93,7 @@ export default function App() {
         if (me.ok) {
           setAuthenticated(true);
           loadDashboardData();
+          loadSecurityData();
         }
       }
     } catch (e) {
@@ -81,6 +110,35 @@ export default function App() {
       if (keysRes.ok) setAgentKeys(await keysRes.json());
     } catch (e) {
       console.error("Error loading dashboard data", e);
+    }
+  }
+
+  async function loadSecurityData() {
+    try {
+      const postureRes = await fetch("/security/posture");
+      if (postureRes.ok) {
+        setSecurityPosture(await postureRes.json());
+      }
+      const auditRes = await fetch("/security/audit?limit=25");
+      if (auditRes.ok) {
+        setAuditLogs(await auditRes.json());
+      }
+    } catch (e) {
+      console.error("Error loading security data", e);
+    }
+  }
+
+  async function handleVerifyAuditChain() {
+    setVerifyingChain(true);
+    try {
+      const res = await fetch("/security/audit/verify", { method: "POST" });
+      if (res.ok) {
+        setChainVerificationResult(await res.json());
+      }
+    } catch (e: any) {
+      alert("Verification error: " + e.message);
+    } finally {
+      setVerifyingChain(false);
     }
   }
 
@@ -214,6 +272,21 @@ export default function App() {
             >
               <Key className="h-4 w-4" />
               <span>Agent Connections</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setActiveTab("security");
+                loadSecurityData();
+              }}
+              className={`w-full flex items-center space-x-3 px-3 py-2 text-xs rounded transition-colors ${
+                activeTab === "security"
+                  ? "bg-primary/20 text-primary border border-primary/40"
+                  : "text-muted-foreground hover:bg-secondary/40 hover:text-foreground"
+              }`}
+            >
+              <Shield className="h-4 w-4" />
+              <span>Security Center</span>
             </button>
 
             <button
@@ -455,6 +528,179 @@ export default function App() {
                       No agent keys generated yet.
                     </div>
                   )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* SECURITY CENTER */}
+          {activeTab === "security" && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {/* Security Posture Score Card */}
+                <div className="p-6 rounded border border-border bg-card space-y-4 md:col-span-1 blood-border">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs uppercase tracking-wider text-muted-foreground font-semibold">
+                      Security Posture
+                    </span>
+                    <Shield className="h-5 w-5 text-primary corruption-glow" />
+                  </div>
+                  <div className="flex items-baseline space-x-2">
+                    <span className="text-4xl font-bold text-foreground">
+                      {securityPosture ? `${securityPosture.score}%` : "---"}
+                    </span>
+                    <span className="text-xs text-status-ok font-semibold">
+                      {securityPosture && securityPosture.score === 100 ? "OPTIMAL" : "ACTIVE DEFENSE"}
+                    </span>
+                  </div>
+                  <div className="space-y-2 pt-2 border-t border-border text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Master Key 0600</span>
+                      <span className={securityPosture?.master_key_secure ? "text-status-ok" : "text-status-critical"}>
+                        {securityPosture?.master_key_secure ? "ENFORCED" : "CHECK"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Admin 2FA (TOTP)</span>
+                      <span className={securityPosture?.admin_2fa_enforced ? "text-status-ok" : "text-status-warn"}>
+                        {securityPosture?.admin_2fa_enforced ? "ENFORCED" : "PENDING"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Egress SSRF Guard</span>
+                      <span className={securityPosture?.egress_default_deny ? "text-status-ok" : "text-status-critical"}>
+                        {securityPosture?.egress_default_deny ? "ACTIVE" : "DISABLED"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Container Cap Drop</span>
+                      <span className={securityPosture?.container_capabilities_dropped ? "text-status-ok" : "text-status-critical"}>
+                        {securityPosture?.container_capabilities_dropped ? "ALL DROPPED" : "UNSAFE"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Hash Chain Intact</span>
+                      <span className={securityPosture?.audit_chain_valid ? "text-status-ok" : "text-status-critical"}>
+                        {securityPosture?.audit_chain_valid ? "VALID" : "TAMPERED"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Egress Smokescreen & Isolation Card */}
+                <div className="p-6 rounded border border-border bg-card space-y-4 md:col-span-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-bold uppercase tracking-wider text-foreground">
+                        Egress SSRF Isolation Guard
+                      </h3>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        All scraper engine containers operate inside strict <code>internal: true</code> Docker bridge networks. Outbound requests are routed through Stripe Smokescreen.
+                      </p>
+                    </div>
+                    <Lock className="h-5 w-5 text-status-info" />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4 pt-2 text-xs">
+                    <div className="p-3 rounded bg-secondary/30 border border-border space-y-1">
+                      <div className="font-semibold text-foreground">Cloud Metadata (169.254.169.254)</div>
+                      <div className="text-[10px] text-status-ok flex items-center gap-1">
+                        <CheckCircle2 className="h-3 w-3" /> Hard Blocked (Fail-Closed)
+                      </div>
+                    </div>
+                    <div className="p-3 rounded bg-secondary/30 border border-border space-y-1">
+                      <div className="font-semibold text-foreground">RFC1918 Private Subnets</div>
+                      <div className="text-[10px] text-status-ok flex items-center gap-1">
+                        <CheckCircle2 className="h-3 w-3" /> 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded bg-secondary/20 border border-border text-xs flex items-center justify-between">
+                    <span className="text-muted-foreground">Mediation Sidecar Protocol:</span>
+                    <span className="font-semibold text-status-info">Unix Domain Socket (/var/lib/scraper-swarm/swarmd.sock)</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Cryptographic Hash-Chain Audit Log */}
+              <div className="p-6 rounded border border-border bg-card space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-bold uppercase tracking-wider text-foreground flex items-center gap-2">
+                      Cryptographic Audit Log
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-primary/20 text-primary border border-primary/40">
+                        SHA-256 HASH-CHAINED
+                      </span>
+                    </h3>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Every administrative action, key issuance, and deployment creates an immutable hash-chained entry to prevent tampering.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleVerifyAuditChain}
+                    disabled={verifyingChain}
+                    className="flex items-center gap-2 px-3 py-1.5 bg-secondary text-foreground text-xs rounded border border-border hover:bg-secondary/80 transition-colors"
+                  >
+                    <RefreshCw className={`h-3 w-3 ${verifyingChain ? "animate-spin" : ""}`} />
+                    Verify Integrity
+                  </button>
+                </div>
+
+                {chainVerificationResult && (
+                  <div className={`p-3 rounded text-xs border ${
+                    chainVerificationResult.valid
+                      ? "bg-status-ok/10 border-status-ok/40 text-status-ok"
+                      : "bg-status-critical/10 border-status-critical/40 text-status-critical"
+                  }`}>
+                    {chainVerificationResult.valid ? (
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="h-4 w-4" />
+                        <span>Cryptographic chain verified: All {chainVerificationResult.entries_checked} entries intact without tampering.</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <AlertTriangle className="h-4 w-4" />
+                        <span>Cryptographic chain validation failed! Possible tampering detected.</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="overflow-x-auto border border-border rounded">
+                  <table className="w-full text-xs text-left">
+                    <thead className="bg-secondary/40 text-muted-foreground border-b border-border uppercase text-[10px]">
+                      <tr>
+                        <th className="p-3">ID</th>
+                        <th className="p-3">Timestamp</th>
+                        <th className="p-3">Actor</th>
+                        <th className="p-3">Action</th>
+                        <th className="p-3">Target</th>
+                        <th className="p-3">Entry Hash (SHA-256)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {auditLogs.map((entry) => (
+                        <tr key={entry.id} className="hover:bg-secondary/20 font-mono">
+                          <td className="p-3 text-muted-foreground">#{entry.id}</td>
+                          <td className="p-3 text-muted-foreground whitespace-nowrap">{entry.timestamp}</td>
+                          <td className="p-3 font-semibold text-foreground">{entry.actor}</td>
+                          <td className="p-3 text-primary">{entry.action}</td>
+                          <td className="p-3 text-muted-foreground">{entry.target || "---"}</td>
+                          <td className="p-3 text-[10px] text-muted-foreground font-mono truncate max-w-[180px]">
+                            {entry.entry_hash.slice(0, 16)}...
+                          </td>
+                        </tr>
+                      ))}
+                      {auditLogs.length === 0 && (
+                        <tr>
+                          <td colSpan={6} className="p-4 text-center text-muted-foreground text-xs">
+                            No audit log events recorded yet.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
