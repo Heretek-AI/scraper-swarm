@@ -1,0 +1,17 @@
+id: cyberscraper
+name: CyberScraper-2077
+tier: optional
+verified: false
+license:
+  spdx: MIT
+  notice: "CyberScraper provides a cyberpunk-themed Streamlit UI. Accessible exclusively behind panel authenticated proxy."
+image: { repo: itsowen/cyberscraper-2077, tag: latest }
+resources:
+  lite:     { cpus: 1, mem: 1g }
+  standard: { cpus: 2, mem: 2g }
+  heavy:    { cpus: 4, mem: 4g }
+networks: [svc, egress-web]
+port: 8501
+hardening: { user: "1000:1000", tmpfs: ["/tmp"] }
+secrets: [OPENAI_API_KEY]
+native_exposable: false

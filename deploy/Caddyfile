@@ -1,0 +1,56 @@
+# Caddy Edge Proxy Configuration for Scraper Swarm
+# Automated Let's Encrypt TLS with forward-auth guards for human interfaces
+
+{$SWARM_DOMAIN:localhost} {
+    # Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Content-Security-Policy "default-src 'self'; frame-ancestors 'none'; object-src 'none';"
+    }
+
+    # Authenticated MCP Gateway Route
+    handle /mcp* {
+        reverse_proxy gateway:8000
+    }
+
+    # Protected Web UIs: Forward-Auth through panel-api session verification
+    handle /apps/maxun/* {
+        forward_auth panel-api:8000 {
+            uri /auth/me
+            copy_headers swarm_session
+        }
+        uri strip_prefix /apps/maxun
+        reverse_proxy maxun:8080
+    }
+
+    handle /apps/cyberscraper/* {
+        forward_auth panel-api:8000 {
+            uri /auth/me
+            copy_headers swarm_session
+        }
+        uri strip_prefix /apps/cyberscraper
+        reverse_proxy cyberscraper:8501
+    }
+
+    # API routes
+    handle /auth/* {
+        reverse_proxy panel-api:8000
+    }
+
+    handle /services/* {
+        reverse_proxy panel-api:8000
+    }
+
+    handle /agents/* {
+        reverse_proxy panel-api:8000
+    }
+
+    # Static Web Panel UI (Compiled Vite React Bundle)
+    handle {
+        root * /var/www/panel-web
+        file_server
+        try_files {path} /index.html
+    }
+}

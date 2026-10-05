@@ -1,0 +1,17 @@
+id: cloakbrowser
+name: CloakBrowser
+tier: optional
+verified: false
+license:
+  spdx: "LicenseRef-Proprietary"
+  notice: "Wrappers are MIT, but the underlying modified Chromium binary is proprietary. Concurrency is limited on the free tier."
+image: { repo: cloakhq/cloakbrowser, tag: latest }
+resources:
+  lite:     { cpus: 1, mem: 1g, shm: 1g }
+  standard: { cpus: 2, mem: 2g, shm: 2g }
+  heavy:    { cpus: 4, mem: 4g, shm: 4g }
+networks: [svc, egress-web]
+port: 9222
+hardening: { user: "1000:1000", seccomp: chromium }
+secrets: [CLOAKBROWSER_LICENSE_KEY]
+native_exposable: false

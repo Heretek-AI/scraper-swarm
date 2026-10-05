@@ -1,0 +1,20 @@
+id: gpt-researcher
+name: GPT Researcher
+tier: core
+verified: false
+license:
+  spdx: Apache-2.0
+image: { repo: gptresearcher/gpt-researcher, tag: latest }
+resources:
+  lite:     { cpus: 1, mem: 1g }
+  standard: { cpus: 2, mem: 2g }
+  heavy:    { cpus: 4, mem: 4g }
+networks: [svc, egress-web]
+requires: [searxng]
+port: 8000
+hardening: { user: "1000:1000", tmpfs: ["/tmp"] }
+secrets: [OPENAI_API_KEY]
+env:
+  RETRIEVER: "searx"
+  SEARX_URL: "http://searxng:8080"
+native_exposable: true

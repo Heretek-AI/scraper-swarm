@@ -1,0 +1,15 @@
+id: firecrawl
+name: Firecrawl
+tier: advanced
+verified: false
+license:
+  spdx: AGPL-3.0-only
+  notice: "Firecrawl is AGPL-3.0. Heavy resource footprint requiring at least 8GB RAM."
+image: { repo: firecrawl/firecrawl, tag: latest }
+resources:
+  standard: { cpus: 4, mem: 8g, shm: 2g }
+  heavy:    { cpus: 8, mem: 16g, shm: 4g }
+networks: [svc, egress-web]
+port: 3002
+hardening: { user: "1000:1000", seccomp: chromium }
+native_exposable: false

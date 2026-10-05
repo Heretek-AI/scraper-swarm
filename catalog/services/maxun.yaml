@@ -1,0 +1,16 @@
+id: maxun
+name: Maxun
+tier: optional
+verified: false
+license:
+  spdx: AGPL-3.0-only
+  notice: "Maxun is licensed under AGPL-3.0. Accessible only via authenticated panel forward proxy."
+image: { repo: getmaxun/maxun-backend, tag: latest }
+resources:
+  lite:     { cpus: 1, mem: 2g, shm: 1g }
+  standard: { cpus: 2, mem: 4g, shm: 2g }
+  heavy:    { cpus: 4, mem: 8g, shm: 4g }
+networks: [svc, egress-web]
+port: 8080
+hardening: { user: "1000:1000", seccomp: chromium }
+native_exposable: false

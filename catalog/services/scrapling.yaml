@@ -1,0 +1,16 @@
+id: scrapling
+name: Scrapling
+tier: core
+verified: false
+license:
+  spdx: BSD-3-Clause
+  notice: "Scrapling uses Camoufox browser components for adaptive stealth fetching."
+image: { repo: pyd4vinci/scrapling, tag: latest }
+resources:
+  lite:     { cpus: 1, mem: 1g, shm: 512m }
+  standard: { cpus: 2, mem: 2g, shm: 1g }
+  heavy:    { cpus: 4, mem: 4g, shm: 2g }
+networks: [svc, egress-web]
+port: 8000
+hardening: { user: "1000:1000", seccomp: chromium, tmpfs: ["/tmp"] }
+native_exposable: true
