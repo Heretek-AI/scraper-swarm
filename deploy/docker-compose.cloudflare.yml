@@ -1,0 +1,18 @@
+# Scraper Swarm — Cloudflare Zero-Trust Tunnel Overlay
+# Allows secure access over public domains without open inbound firewall ports
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - edge
+    depends_on:
+      - caddy
+
+networks:
+  edge:
+    name: swarm-edge

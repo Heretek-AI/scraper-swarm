@@ -42,28 +42,52 @@ echo "   ${BOOTSTRAP_TOKEN}"
 echo "========================================================"
 echo ""
 
+CF_TOKEN="${CLOUDFLARE_TUNNEL_TOKEN:-}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --cloudflare-token)
+            CF_TOKEN="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
 # 5. Persist bootstrap token securely for control plane startup
 BOOT_ENV_FILE="${DATA_DIR}/env/bootstrap.env"
 cat <<EOF > "${BOOT_ENV_FILE}"
 SWARM_BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN}
 SWARM_DATA_DIR=${DATA_DIR}
+CLOUDFLARE_TUNNEL_TOKEN=${CF_TOKEN}
 EOF
 chmod 600 "${BOOT_ENV_FILE}"
 
 export SWARM_BOOTSTRAP_TOKEN="${BOOTSTRAP_TOKEN}"
 export SWARM_DATA_DIR="${DATA_DIR}"
+export CLOUDFLARE_TUNNEL_TOKEN="${CF_TOKEN}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+COMPOSE_FILES=("-f" "${REPO_ROOT}/deploy/docker-compose.control.yml")
+if [ -n "${CF_TOKEN}" ]; then
+    echo "[+] Cloudflare Tunnel token detected. Attaching cloudflared sidecar..."
+    COMPOSE_FILES+=("-f" "${REPO_ROOT}/deploy/docker-compose.cloudflare.yml")
+fi
+
 echo "[+] Starting Scraper Swarm control plane..."
 if docker info >/dev/null 2>&1; then
-    docker compose -f "${REPO_ROOT}/deploy/docker-compose.control.yml" up -d
+    docker compose "${COMPOSE_FILES[@]}" up -d
     echo ""
     echo "[✓] Scraper Swarm Control Plane is running!"
     echo "[✓] Navigate to: https://localhost or http://localhost:80"
+    if [ -n "${CF_TOKEN}" ]; then
+        echo "[✓] Cloudflare Zero-Trust Tunnel active."
+    fi
     echo "[✓] Enter your bootstrap token above to complete the Setup Wizard."
 else
     echo "[!] Docker daemon not directly accessible without sudo. Start the stack manually with:"
-    echo "    sudo docker compose -f ${REPO_ROOT}/deploy/docker-compose.control.yml up -d"
+    echo "    sudo docker compose ${COMPOSE_FILES[*]} up -d"
 fi
