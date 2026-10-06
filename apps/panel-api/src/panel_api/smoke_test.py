@@ -14,15 +14,131 @@ only HTTP status codes, latencies, and public result counts.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
+import secrets
 import time
 from typing import Any
 
+import aiosqlite
 import httpx
+
+# P1-live-smoke evidence (Phase 01-live-smoke):
+# - file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2
+# - file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/walkthrough.md::smoke-3-3
+# - file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/workbench_fix_walkthrough.md::mcp-proof
+
+GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://gateway:8000")
+
+# Tightened sentinel (mcp-proof): the full documentation sentence only. The
+# bare "Example Domain" fallback is rejected because it weakens proof that
+# Crawl4AI returned the real example.com markdown.
+FULL_SENTINEL = "This domain is for use in documentation examples"
+
+
+def _swarm_db_path() -> str:
+    base = os.environ.get("SWARM_DATA_DIR", "/var/lib/scraper-swarm")
+    return os.path.join(base, "panel.db")
 
 
 class SmokeTestRunner:
     """Runs diagnostics against running engine containers."""
+
+    @staticmethod
+    async def _mint_ephemeral_agent_key() -> tuple[str | None, str | None, str]:
+        """Mints a short-lived agent key so smoke tests can prove the live
+        Agent -> /mcp -> engine path with real authentication.
+
+        Returns (raw_token, key_id, error). The raw token is only ever sent
+        as a Bearer header, never echoed into check messages. Callers must
+        revoke via :meth:`_revoke_ephemeral_agent_key` in a finally block.
+        """
+        raw = f"swarm_smoke_{secrets.token_hex(24)}"
+        key_id = f"smoke-{secrets.token_hex(8)}"
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        try:
+            async with aiosqlite.connect(_swarm_db_path()) as db:
+                await db.execute(
+                    "INSERT INTO agent_keys "
+                    "(id, name, key_hash, key_prefix, scopes, rate_limit_rpm) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        key_id,
+                        "smoke-ephemeral",
+                        digest,
+                        raw[:14] + "...",
+                        json.dumps(["search", "scrape"]),
+                        60,
+                    ),
+                )
+                await db.commit()
+            return raw, key_id, ""
+        except Exception as e:
+            return None, None, f"{type(e).__name__}: {e}"
+
+    @staticmethod
+    async def _revoke_ephemeral_agent_key(key_id: str | None) -> None:
+        """Best-effort cleanup of a smoke-test agent key."""
+        if not key_id:
+            return
+        try:
+            async with aiosqlite.connect(_swarm_db_path()) as db:
+                await db.execute("DELETE FROM agent_keys WHERE id = ?", (key_id,))
+                await db.commit()
+        except Exception:  # noqa: S110 - cleanup only; the 192-bit secret is unguessable
+            pass
+
+    @staticmethod
+    async def _mcp_tools_call(
+        raw_token: str, tool: str, args: dict[str, Any], timeout: float = 45.0
+    ) -> tuple[int | None, str, int, str]:
+        """Calls a gateway tool via authenticated /mcp JSON-RPC.
+
+        Returns (http_status, result_text, latency_ms, error). The bearer
+        token never appears in the returned strings.
+        """
+        started = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{GATEWAY_URL}/mcp",
+                    headers={"Authorization": f"Bearer {raw_token}"},
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": tool, "arguments": args},
+                    },
+                )
+            latency = int((time.perf_counter() - started) * 1000)
+            try:
+                body = resp.json()
+            except Exception:
+                body = {}
+            text = ""
+            try:
+                content = body.get("result", {}).get("content", [])
+                if content:
+                    text = content[0].get("text", "")
+            except Exception:
+                text = ""
+            return resp.status_code, text if isinstance(text, str) else "", latency, ""
+        except Exception as e:
+            return None, "", 0, f"{type(e).__name__}: {e}"
+
+    @staticmethod
+    async def _mcp_unauth_status() -> tuple[int | None, str]:
+        """POSTs to /mcp without credentials; expects HTTP 401 (fail-closed)."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{GATEWAY_URL}/mcp",
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                )
+            return resp.status_code, ""
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
 
     @staticmethod
     async def test_searxng() -> dict[str, Any]:
@@ -68,6 +184,72 @@ class SmokeTestRunner:
                 )
             except Exception as e:
                 checks.append({"name": "JSON Search API Query", "passed": False, "message": str(e)})
+
+        # 3. Agent -> Gateway /mcp -> SearXNG proof (mcp-proof): authenticated
+        # JSON-RPC tools/call web_search must return HTTP 200 with
+        # gateway-formatted SearXNG output ("Title:" lines, or the documented
+        # empty state "No results found." per walkthrough.md::smoke-3-3 which
+        # records 0 results as a live passing state) and a recorded latency.
+        # A gateway error string fails the check: it proves SearXNG was not
+        # reached. Unauthenticated /mcp must be HTTP 401 (fail-closed auth).
+        raw, key_id, mint_err = await SmokeTestRunner._mint_ephemeral_agent_key()
+        try:
+            if raw is None:
+                checks.append(
+                    {
+                        "name": "Agent->Gateway->SearXNG (/mcp web_search)",
+                        "passed": False,
+                        "message": f"Fail-closed: ephemeral agent key unavailable: {mint_err}",
+                    }
+                )
+            else:
+                unauth_status, unauth_err = await SmokeTestRunner._mcp_unauth_status()
+                if unauth_err:
+                    checks.append(
+                        {
+                            "name": "Unauth /mcp denied (401)",
+                            "passed": False,
+                            "message": f"Fail-closed: /mcp unreachable: {unauth_err}",
+                        }
+                    )
+                else:
+                    checks.append(
+                        {
+                            "name": "Unauth /mcp denied (401)",
+                            "passed": unauth_status == 401,
+                            "message": f"Unauthenticated JSON-RPC HTTP {unauth_status}",
+                        }
+                    )
+                mcp_status, mcp_text, mcp_latency, mcp_err = await SmokeTestRunner._mcp_tools_call(
+                    raw,
+                    "web_search",
+                    {"query": "open source search cluster architecture", "limit": 5},
+                    timeout=60.0,
+                )
+                if mcp_err:
+                    checks.append(
+                        {
+                            "name": "Agent->Gateway->SearXNG (/mcp web_search)",
+                            "passed": False,
+                            "message": f"Fail-closed: /mcp unreachable: {mcp_err}",
+                        }
+                    )
+                else:
+                    proven = mcp_status == 200 and (
+                        "Title:" in mcp_text or mcp_text.strip() == "No results found."
+                    )
+                    checks.append(
+                        {
+                            "name": "Agent->Gateway->SearXNG (/mcp web_search)",
+                            "passed": proven,
+                            "message": (
+                                f"JSON-RPC HTTP {mcp_status} "
+                                f"latency_ms {mcp_latency} chars {len(mcp_text)}"
+                            ),
+                        }
+                    )
+        finally:
+            await SmokeTestRunner._revoke_ephemeral_agent_key(key_id)
 
         latency = int((time.perf_counter() - start) * 1000)
         all_passed = all(c["passed"] for c in checks)
@@ -125,7 +307,8 @@ class SmokeTestRunner:
 
             # 3. Live crawl of https://example.com with sentinel-text proof.
             # mcp-proof: fetch_page via /mcp must return markdown containing
-            # "This domain is for use in documentation examples".
+            # the full sentence "This domain is for use in documentation
+            # examples" (tightened: no bare "Example Domain" fallback).
             # NOTE: the bearer token is sent but never echoed into check messages.
             try:
                 r3 = await client.post(
@@ -140,10 +323,10 @@ class SmokeTestRunner:
                     text = (
                         payload.get("markdown", "") if isinstance(payload, dict) else str(payload)
                     )
-                    sentinel_ok = (
-                        "This domain is for use in documentation examples" in text
-                        or "Example Domain" in text
-                    )
+                    # Tightened sentinel: the full documentation sentence is
+                    # required; the bare "Example Domain" fallback is rejected
+                    # because it weakens proof of a real Crawl4AI extraction.
+                    sentinel_ok = FULL_SENTINEL in text
                 checks.append(
                     {
                         "name": "Live Crawl Sentinel (example.com)",
@@ -159,6 +342,45 @@ class SmokeTestRunner:
                         "message": str(e),
                     }
                 )
+
+        # 4. Agent -> Gateway /mcp -> Crawl4AI proof (mcp-proof): authenticated
+        # JSON-RPC tools/call fetch_page must return HTTP 200 with the full
+        # sentinel sentence and a recorded latency.
+        raw, key_id, mint_err = await SmokeTestRunner._mint_ephemeral_agent_key()
+        try:
+            if raw is None:
+                checks.append(
+                    {
+                        "name": "Agent->Gateway->Crawl4AI (/mcp fetch_page)",
+                        "passed": False,
+                        "message": f"Fail-closed: ephemeral agent key unavailable: {mint_err}",
+                    }
+                )
+            else:
+                status, text, latency, err = await SmokeTestRunner._mcp_tools_call(
+                    raw, "fetch_page", {"url": "https://example.com"}, timeout=60.0
+                )
+                if err:
+                    checks.append(
+                        {
+                            "name": "Agent->Gateway->Crawl4AI (/mcp fetch_page)",
+                            "passed": False,
+                            "message": f"Fail-closed: /mcp unreachable: {err}",
+                        }
+                    )
+                else:
+                    proven = status == 200 and FULL_SENTINEL in text
+                    checks.append(
+                        {
+                            "name": "Agent->Gateway->Crawl4AI (/mcp fetch_page)",
+                            "passed": proven,
+                            "message": (
+                                f"JSON-RPC HTTP {status} latency_ms {latency} chars {len(text)}"
+                            ),
+                        }
+                    )
+        finally:
+            await SmokeTestRunner._revoke_ephemeral_agent_key(key_id)
 
         latency = int((time.perf_counter() - start) * 1000)
         return {
@@ -436,59 +658,99 @@ class SmokeTestRunner:
 
     @staticmethod
     async def test_egress_guard(service_id: str = "egress-web") -> dict[str, Any]:
-        """Validates fail-closed SSRF egress protection via Smokescreen.
+        """Validates fail-closed SSRF egress protection via Smokescreen + gateway pre-deny.
 
-        P1 AC3 (smoke-3-3): 169.254.169.254 + RFC1918 must be denied with
-        407/403 while public example.com stays reachable.
+        P1 AC3 (smoke-3-3): 169.254.169.254 + loopback + RFC1918 + CGNAT +
+        unspecified/IPv6-loopback must be denied with an explicit proxy denial
+        (HTTP 407/403 ONLY -- 502/504/400 are ambiguous transport errors and
+        never count as proof of a block) while public example.com stays
+        reachable. Every probe is fail-closed: any transport exception fails
+        the check instead of passing it.
+
+        Two deterministic layers are covered:
+        - raw proxy probes for the strict IP literals Smokescreen itself
+          denies (127.0.0.1, 10/8, 172.16/12, 192.168/16, 100.64/10,
+          169.254/16, 0.0.0.0, ::1);
+        - authenticated /mcp fetch_page probes proving the gateway pre-deny
+          (panel_api.ssrf_guard) rejects loopback/RFC1918/metadata/CGNAT plus
+          decimal/hex/octal/dword encodings that Smokescreen's Go resolver
+          cannot parse, before anything is delegated to Crawl4AI.
+        Redirect-to-internal is enforced per-connection by Smokescreen (every
+        dial re-checks the resolved destination IP), so no external redirector
+        dependency -- which would be flaky -- is needed for a deterministic
+        harness.
         """
         start = time.perf_counter()
         checks = []
         proxy_url = os.environ.get("HTTP_PROXY", "http://egress-web:4750")
 
-        # Verify proxy blocks internal/private RFC1918 and metadata addresses
-        async with httpx.AsyncClient(proxy=proxy_url, timeout=5.0) as client:
-            # 1. AWS/Cloud Metadata Block
-            try:
-                r = await client.get("http://169.254.169.254/latest/meta-data/")
-                blocked = r.status_code in (400, 403, 407, 502, 504)
-                checks.append(
-                    {
-                        "name": "Cloud Metadata SSRF Block",
-                        "passed": blocked,
-                        "message": f"Blocked metadata request with HTTP {r.status_code}",
-                    }
-                )
-            except Exception:
-                checks.append(
-                    {
-                        "name": "Cloud Metadata SSRF Block",
-                        "passed": True,
-                        "message": "Connection strictly refused by egress proxy (Expected)",
-                    }
-                )
+        # Smokescreen denies with 407 (its block page rides on Proxy
+        # Authentication Required) or 403. Nothing else counts.
+        BLOCKED = (403, 407)
 
-            # 2. RFC1918 Private Subnet Blocks (10/8 and 192.168/16 per P1 AC3)
-            for target in ("http://10.0.0.1/", "http://192.168.1.1/"):
+        # Strict IP literals Smokescreen denies deterministically at the proxy.
+        proxy_targets = [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1/",
+            "http://10.0.0.1/",
+            "http://172.16.0.1/",
+            "http://192.168.1.1/",
+            "http://100.64.0.1/",
+            "http://0.0.0.0/",
+            "http://[::1]/",
+        ]
+
+        # Targets the gateway must pre-deny via /mcp fetch_page, including the
+        # decimal/hex/octal/dword encodings Smokescreen cannot parse (it only
+        # resolves strict dotted-decimal/IPv6, so these would otherwise slip
+        # past as unresolvable DNS names). All are IP literals or
+        # `localhost`, so the gateway decides without any external I/O.
+        mcp_targets = [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1/",
+            "http://10.0.0.1/",
+            "http://172.16.0.1/",
+            "http://192.168.1.1/",
+            "http://100.64.0.1/",
+            "http://0.0.0.0/",
+            "http://[::1]/",
+            "http://localhost/",
+            "http://2130706433/",  # 127.0.0.1 as dword decimal
+            "http://0x7f000001/",  # 127.0.0.1 as dword hex
+            "http://0177.0.0.1/",  # 127.0.0.1 as octal quad
+            "http://0xA9.0xFE.0xA9.0xFE/",  # 169.254.169.254 as hex quad
+            "http://2852039166/",  # 169.254.169.254 as dword decimal
+        ]
+
+        # Verify proxy blocks internal/private/metadata/unspecified addresses.
+        # Fail-closed: any transport exception fails the check (it proves the
+        # proxy path is unusable, not that the target was blocked).
+        async with httpx.AsyncClient(proxy=proxy_url, timeout=5.0) as client:
+            for target in proxy_targets:
                 try:
                     r = await client.get(target)
-                    blocked = r.status_code in (400, 403, 407, 502, 504)
+                    denied = r.status_code in BLOCKED
                     checks.append(
                         {
-                            "name": f"RFC1918 SSRF Block ({target})",
-                            "passed": blocked,
-                            "message": f"Blocked private subnet with HTTP {r.status_code}",
+                            "name": f"Proxy SSRF Block ({target})",
+                            "passed": denied,
+                            "message": (
+                                f"Blocked with HTTP {r.status_code}"
+                                if denied
+                                else f"NOT BLOCKED: HTTP {r.status_code} (fail-closed)"
+                            ),
                         }
                     )
                 except Exception:
                     checks.append(
                         {
-                            "name": f"RFC1918 SSRF Block ({target})",
-                            "passed": True,
-                            "message": "Connection strictly refused by egress proxy (Expected)",
+                            "name": f"Proxy SSRF Block ({target})",
+                            "passed": False,
+                            "message": "Fail-closed: proxy probe raised (no block proven)",
                         }
                     )
 
-            # 3. Public destination MUST stay reachable (fail-closed, not fail-dead).
+            # Public destination MUST stay reachable (fail-closed, not fail-dead).
             try:
                 r = await client.get("http://example.com/", timeout=15.0)
                 allowed = r.status_code == 200 and "Example Domain" in r.text
@@ -507,6 +769,53 @@ class SmokeTestRunner:
                         "message": f"Egress proxy unusable for public traffic: {e}",
                     }
                 )
+
+        # Gateway pre-deny layer: authenticated /mcp fetch_page must return
+        # HTTP 200 whose text carries the fail-closed SSRF denial for every
+        # internal/encoded target. Fail-closed on key-mint or transport errors.
+        raw, key_id, mint_err = await SmokeTestRunner._mint_ephemeral_agent_key()
+        try:
+            if raw is None:
+                checks.append(
+                    {
+                        "name": "Gateway SSRF pre-deny (/mcp fetch_page)",
+                        "passed": False,
+                        "message": f"Fail-closed: ephemeral agent key unavailable: {mint_err}",
+                    }
+                )
+            else:
+                for target in mcp_targets:
+                    (
+                        mcp_status,
+                        mcp_text,
+                        mcp_latency,
+                        mcp_err,
+                    ) = await SmokeTestRunner._mcp_tools_call(
+                        raw, "fetch_page", {"url": target}, timeout=30.0
+                    )
+                    if mcp_err:
+                        checks.append(
+                            {
+                                "name": f"Gateway SSRF pre-deny ({target})",
+                                "passed": False,
+                                "message": f"Fail-closed: /mcp unreachable: {mcp_err}",
+                            }
+                        )
+                    else:
+                        denied = mcp_status == 200 and "SSRF denied" in mcp_text
+                        checks.append(
+                            {
+                                "name": f"Gateway SSRF pre-deny ({target})",
+                                "passed": denied,
+                                "message": (
+                                    f"Denied latency_ms {mcp_latency}"
+                                    if denied
+                                    else f"NOT DENIED: HTTP {mcp_status} (fail-closed)"
+                                ),
+                            }
+                        )
+        finally:
+            await SmokeTestRunner._revoke_ephemeral_agent_key(key_id)
 
         latency = int((time.perf_counter() - start) * 1000)
         return {

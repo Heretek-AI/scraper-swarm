@@ -68,7 +68,14 @@ def render_service(
         if param in sel.params:
             env[env_name] = str(sel.params[param])
     if "egress-web" in entry.networks and entry.id != PROXY_SERVICE:
-        no_proxy = ",".join(["localhost", "127.0.0.1", *sorted(peers)])
+        # P1-live-smoke NO_PROXY fix (walkthrough.md::smoke-3-3): loopback must
+        # NOT bypass Smokescreen, otherwise fetch_page(http://127.0.0.1/...)
+        # skips the egress proxy entirely. In-stack peers stay direct (Redis
+        # RESP and other non-HTTP peer traffic cannot traverse an HTTP proxy;
+        # CRAWL4AI_ALLOW_INTERNAL_URLS delegation then covers only legitimate
+        # peer DNS while the gateway pre-deny + Smokescreen stop loopback,
+        # metadata, RFC1918/CGNAT, and encoded literals).
+        no_proxy = ",".join(sorted(peers))
         for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
             env[key] = PROXY_URL
         env["NO_PROXY"] = env["no_proxy"] = no_proxy

@@ -64,6 +64,10 @@ def test_web_facing_services_get_proxy_env_and_peers_bypass(catalog):
     assert env["HTTPS_PROXY"] == "http://egress-web:4750"
     assert "egress-web" not in env["NO_PROXY"].split(",")  # never bypass the proxy itself
     assert "valkey" in env["NO_PROXY"].split(",")  # in-stack peers are reached directly
+    # P1-live-smoke NO_PROXY fix: loopback must NOT bypass Smokescreen or
+    # fetch_page(http://127.0.0.1/...) skips the egress proxy entirely.
+    assert "127.0.0.1" not in env["NO_PROXY"].split(",")
+    assert "localhost" not in env["NO_PROXY"].split(",")
     assert "environment" not in compose["services"]["valkey"]  # internal-only: no proxy env
 
 

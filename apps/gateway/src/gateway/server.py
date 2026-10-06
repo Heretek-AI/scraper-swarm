@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -13,6 +14,7 @@ import httpx
 from fastapi import Cookie, FastAPI, Header, HTTPException, Request, status
 from mcp.server.mcpserver import MCPServer
 from panel_api.audit import AuditLogger
+from panel_api.ssrf_guard import deny_reason_for_url, redact_url_for_audit, sanitize_details
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -27,8 +29,15 @@ mcp_server = MCPServer(name="ScraperSwarmGateway")
 async def log_agent_activity(
     agent_name: str, action: str, target: str | None = None, details: dict[str, Any] | None = None
 ) -> None:
-    """Logs agent tool execution with cryptographic hash-chaining in the SQLite audit log."""
+    """Logs agent tool execution with cryptographic hash-chaining in the SQLite audit log.
+
+    P1-live-smoke audit fix: the gateway mounts ``swarm_data`` read-write so
+    live /mcp calls actually persist ``agent:*`` rows; failures are surfaced
+    as warnings (never silent debug) and details are sanitized so the
+    no-secrets invariant holds while rows are written.
+    """
     if not os.path.exists(DB_PATH):
+        log.warning("Agent activity audit skipped: database path %s missing", DB_PATH)
         return
     try:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -37,11 +46,11 @@ async def log_agent_activity(
             await logger.log(
                 actor=f"agent:{agent_name}",
                 action=action,
-                target=target,
-                details=details,
+                target=redact_url_for_audit(target) if target else None,
+                details=sanitize_details(details),
             )
     except Exception as e:
-        log.debug("Agent activity audit logging failed: %s", e)
+        log.warning("Agent activity audit logging failed for %s/%s: %s", agent_name, action, e)
 
 
 async def verify_agent_token(
@@ -168,12 +177,21 @@ async def fetch_page(url: str) -> str:
     """Scrapes a URL using Crawl4AI REST endpoint.
 
     P1 Live Engine Stack Smoke Test (Phase 01-live-smoke): live path
-    Agent -> /mcp -> Crawl4AI -> Smokescreen -> Internet. SSRF is delegated
-    fail-closed to Smokescreen (CRAWL4AI_ALLOW_INTERNAL_URLS=true in the
-    catalog; the renderer forces HTTP(S)_PROXY=http://egress-web:4750).
+    Agent -> /mcp -> Crawl4AI -> Smokescreen -> Internet. SSRF is denied
+    fail-closed at this gateway layer for 169.254/127/RFC1918/CGNAT/IPv6
+    loopback/unspecified plus decimal/hex/octal/dword encodings *before*
+    delegating; CRAWL4AI_ALLOW_INTERNAL_URLS=true in the catalog then only
+    ever sees legitimate in-stack peer DNS, while Smokescreen remains the
+    per-connection enforcement point for plain DNS names.
     Evidence: scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2,
     walkthrough.md::smoke-3-3, workbench_fix_walkthrough.md::mcp-proof.
     """
+    try:
+        denial = await asyncio.wait_for(asyncio.to_thread(deny_reason_for_url, url), timeout=8.0)
+    except Exception:
+        denial = None  # Resolver unavailable/timed out: delegate to Smokescreen.
+    if denial is not None:
+        return f"SSRF denied (fail-closed): {denial}"
     async with httpx.AsyncClient(timeout=45.0) as client:
         try:
             # 1. Try Crawl4AI /md endpoint

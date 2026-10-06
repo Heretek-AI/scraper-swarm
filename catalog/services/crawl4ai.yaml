@@ -11,6 +11,15 @@ resources:
 networks: [svc, egress-web]
 port: 11235
 hardening: { user: "999:999", seccomp: chromium }
+# P1-live-smoke NO_PROXY fix follow-up (walkthrough.md::smoke-3-3): loopback
+# no longer bypasses Smokescreen, so the image's built-in
+# `curl -f http://localhost:11235/health` probe would be proxied and denied
+# with 407. This override keeps the same probe but pins curl to
+# `--noproxy '*'` so only the healthcheck -- never crawler traffic -- skips
+# the egress proxy.
+health:
+  test: ["CMD-SHELL", "redis-cli ping > /dev/null && curl --noproxy '*' -f http://localhost:11235/health || exit 1"]
+  interval: 30s
 secrets: [CRAWL4AI_API_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY, GROQ_API_KEY]
 env:
   CRAWL4AI_ALLOW_INTERNAL_URLS: "true"

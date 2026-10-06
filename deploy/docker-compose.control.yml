@@ -46,7 +46,10 @@ services:
       - SEARXNG_URL=http://searxng:8080
       - CRAWL4AI_URL=http://crawl4ai:11235
     volumes:
-      - swarm_data:/var/lib/scraper-swarm:ro
+      # P1-live-smoke audit fix: read-write so live /mcp calls persist agent:*
+      # audit rows (hash-chained, sanitized, no secrets). Was :ro which made
+      # log_agent_activity fail silently with agent rows stuck at 0.
+      - swarm_data:/var/lib/scraper-swarm
     networks:
       - edge
       - svc
