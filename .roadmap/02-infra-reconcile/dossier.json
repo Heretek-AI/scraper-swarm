@@ -1,0 +1,40 @@
+{
+  "phase": "02-infra-reconcile",
+  "goal": "Infra reconcile: persistent engine stack with DB-vs-Docker drift repair + auto-restart so P1 test-all 3/3 reproducible",
+  "evidence": [
+    {
+      "hash": "file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json",
+      "quote": "01-live-smoke escalated: AC1/AC2/AC5 FAIL NOW 1/3, DB running vs 0 containers drift"
+    },
+    {
+      "hash": "file:///home/john/Projects/scraper-swarm/deploy/docker-compose.control.yml",
+      "quote": "Control plane + engine stack wiring; gateway mount rw fix in retry1"
+    },
+    {
+      "hash": "file:///home/john/Projects/scraper-swarm/apps/swarmd/src/swarmd/server.py",
+      "quote": "apply_stack / get_status / service_logs intents; catalog cache + missing deploy context blockers found live"
+    },
+    {
+      "hash": "file:///home/john/Projects/scraper-swarm/apps/panel-api/src/panel_api/smoke_test.py",
+      "quote": "SmokeTestRunner with /mcp JSON-RPC proof + fail-closed egress after 142948a"
+    },
+    {
+      "hash": "file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2",
+      "quote": "Spin up SearXNG + Crawl4AI + Smokescreen; Verify MCP Gateway query execution"
+    }
+  ],
+  "acceptance": [
+    "/services/status containers matches installed running (no drift, auto-repair or degraded with reason)",
+    "scraper-swarm-{searxng,crawl4ai,valkey,egress-web} present + healthy 10 min after deploy",
+    "POST /services/test-all 3/3 reproducible on demand with latency",
+    "/mcp web_search + fetch_page return data with full sentinel (not error strings)",
+    "No regressions: catalog 10, pytest green, ruff clean, policy-compliant, audit no secrets, unauth 401",
+    "Operator note on reconcile behavior"
+  ],
+  "brief": "Strict: persistence/reconciliation only (reconciler, restart policies, drift repair, health restart). Cite hashes. No swarms/siblings. See GOAL.md.",
+  "verdict": "conditional-pass: P0s fixed (force resume, health-aware drift, empty/corrupt degraded, starting pending, history, logs bounded), residuals hardening notes (socket restart oracle, test-all fallback, garbage-dict schema, enabled split, history leak) \u2014 qa-a pass + qa-b conditional",
+  "hashes": [
+    "file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json",
+    "file:///home/john/Projects/scraper-swarm/apps/swarmd/src/swarmd/server.py"
+  ]
+}
