@@ -1,9 +1,21 @@
-"""Services router for managing catalog, wizard deployments, and status."""
+"""Services router for managing catalog, wizard deployments, and status.
+
+Phase 02-infra-reconcile (evidence:
+file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json):
+GET /services/status joins DB ``installed_services`` against live Docker
+``ps`` so DB-vs-Docker drift is visible (01 escalated with DB ``running``
+vs 0 containers and ``test-all 1/3``); on drift it triggers a best-effort
+background ``reconcile_now`` repair and otherwise marks services degraded
+with a reason. Status/repair payloads carry names, states, and latencies
+only -- never secrets.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -17,6 +29,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/services", tags=["services"])
 
+# Minimum seconds between automatic background repairs triggered by
+# GET /services/status (prevents repair storms when the UI polls status).
+_AUTO_REPAIR_COOLDOWN_S = 120.0
+_last_auto_repair_ts: float = 0.0
+_auto_repair_task: asyncio.Task | None = None
+
 
 class ServiceInstallRequest(BaseModel):
     service_id: str
@@ -26,12 +44,84 @@ class ServiceInstallRequest(BaseModel):
 
 def get_swarmd() -> SwarmdClient:
     from panel_api.main import app_state
+
     return app_state.swarmd
+
+
+def _live_service_names(containers: list[dict[str, Any]]) -> set[str]:
+    """Service ids with a ``running`` container row.
+
+    ``docker compose ps --format json`` rows carry ``Service`` + ``State``;
+    the ``Name`` fallback strips the ``scraper-swarm-`` project prefix for
+    older/foreign rows.
+    """
+    running: set[str] = set()
+    for c in containers:
+        state = str(c.get("State") or "").lower()
+        if state != "running":
+            continue
+        svc = str(c.get("Service") or "")
+        if not svc:
+            name = str(c.get("Name") or c.get("Names") or "").strip().lstrip("/")
+            if name.startswith("scraper-swarm-"):
+                name = name.removeprefix("scraper-swarm-")
+                if name.endswith("-1"):
+                    name = name[: -len("-1")]
+            svc = name
+        if svc:
+            running.add(svc)
+    return running
+
+
+def compute_drift(installed_running: list[str], containers: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pure drift join: DB ``running`` rows vs live running containers.
+
+    Returns ``{"running": [...], "drift": [...], "degraded": [...]}`` where
+    each degraded entry is ``{"service_id": sid, "reason": ...}``.
+    """
+    live = _live_service_names(containers)
+    drift = sorted(set(installed_running) - live)
+    degraded = [
+        {
+            "service_id": sid,
+            "reason": (
+                "no live container for DB 'running' row "
+                f"(expected scraper-swarm-{sid} running); "
+                "auto-repair attempted or suspended -- see reconcile"
+            ),
+        }
+        for sid in drift
+    ]
+    return {"running": sorted(live), "drift": drift, "degraded": degraded}
+
+
+async def _run_background_repair(swarmd: SwarmdClient) -> None:
+    try:
+        report = await asyncio.wait_for(swarmd.send_intent("reconcile_now", {}), timeout=180.0)
+        logger.info("background auto-repair finished: %s", report.get("reconcile"))
+    except Exception as e:
+        logger.warning("background auto-repair failed: %s", e)
+
+
+def _maybe_trigger_auto_repair(swarmd: SwarmdClient, drift: list[str]) -> bool:
+    """Fires one background ``reconcile_now`` per cooldown window."""
+    global _last_auto_repair_ts, _auto_repair_task
+    if not drift:
+        return False
+    now = time.monotonic()
+    if now - _last_auto_repair_ts < _AUTO_REPAIR_COOLDOWN_S:
+        return False
+    if _auto_repair_task is not None and not _auto_repair_task.done():
+        return False
+    _last_auto_repair_ts = now
+    _auto_repair_task = asyncio.create_task(_run_background_repair(swarmd))
+    return True
 
 
 @router.get("/catalog")
 async def list_catalog():
     from panel_api.main import app_state
+
     catalog = app_state.catalog
     return [
         {
@@ -54,10 +144,7 @@ async def list_installed(
     db: Database = Depends(get_db),
     user: SessionInfo = Depends(require_role("admin", "operator", "viewer")),
 ):
-    query = (
-        "SELECT service_id, profile, status, params, updated_at "
-        "FROM installed_services"
-    )
+    query = "SELECT service_id, profile, status, params, updated_at FROM installed_services"
     async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
         return [
@@ -81,10 +168,7 @@ async def deploy_services(
 ):
     """Renders and applies a validated stack via the swarmd sidecar."""
     # Merge with currently active installed services
-    query = (
-        "SELECT service_id, profile, params FROM installed_services "
-        "WHERE status != 'stopped'"
-    )
+    query = "SELECT service_id, profile, params FROM installed_services WHERE status != 'stopped'"
     async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
         wanted_payload = {
@@ -134,7 +218,13 @@ async def get_live_services_status(
     swarmd: SwarmdClient = Depends(get_swarmd),
     user: SessionInfo = Depends(require_role("admin", "operator", "viewer")),
 ):
-    """Returns live Docker container execution status queried through swarmd sidecar."""
+    """Returns live Docker container execution status queried through swarmd sidecar.
+
+    Phase 02-infra-reconcile: joins DB ``installed_services`` against live
+    ``ps`` so drift is explicit (``drift`` + ``degraded`` with reason). On
+    drift a background ``reconcile_now`` repair is triggered (at most one
+    per cooldown window); the swarmd loop also self-heals on its interval.
+    """
     containers: list[dict[str, Any]] = []
     try:
         res = await swarmd.send_intent("get_ps", {})
@@ -142,17 +232,112 @@ async def get_live_services_status(
     except Exception as e:
         logger.debug("Failed to query get_ps from swarmd: %s", e)
 
-    query = (
-        "SELECT service_id, profile, status, params, updated_at "
-        "FROM installed_services"
-    )
+    query = "SELECT service_id, profile, status, params, updated_at FROM installed_services"
     async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
         installed_map = {r["service_id"]: dict(r) for r in rows}
 
+    installed_running = [
+        sid for sid, row in installed_map.items() if row.get("status") == "running"
+    ]
+    drift_info = compute_drift(installed_running, containers)
+
+    reconcile: dict[str, Any] | None = None
+    try:
+        res = await swarmd.send_intent("get_reconcile_status", {})
+        reconcile = res.get("reconcile")
+    except Exception as e:
+        logger.debug("Failed to query get_reconcile_status from swarmd: %s", e)
+
+    repair_triggered = _maybe_trigger_auto_repair(swarmd, drift_info["drift"])
+
     return {
         "containers": containers,
         "installed": installed_map,
+        "running": drift_info["running"],
+        "drift": drift_info["drift"],
+        "degraded": drift_info["degraded"],
+        "reconcile": reconcile,
+        "repair_triggered": repair_triggered,
+    }
+
+
+@router.get("/reconcile")
+async def get_reconcile_status(
+    swarmd: SwarmdClient = Depends(get_swarmd),
+    user: SessionInfo = Depends(require_role("admin", "operator", "viewer")),
+):
+    """Operator inspect: reconciler desired-state, interval, and last pass.
+
+    Phase 02-infra-reconcile (evidence:
+    file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json).
+    Read-only; triggers no repair.
+    """
+    try:
+        res = await swarmd.send_intent("get_reconcile_status", {})
+        return res.get("reconcile", {})
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"swarmd reconcile status unavailable: {e}",
+        ) from e
+
+
+@router.post("/reconcile")
+async def run_reconcile_now(
+    db: Database = Depends(get_db),
+    swarmd: SwarmdClient = Depends(get_swarmd),
+    user: SessionInfo = Depends(require_role("admin", "operator")),
+):
+    """On-demand drift repair: runs one reconcile pass, then re-verifies.
+
+    Phase 02-infra-reconcile: returns the reconcile report plus post-repair
+    drift so ``test-all 3/3`` reproducibility can be restored on demand
+    without a full re-deploy. May take up to ~3 minutes on image pulls.
+    """
+    try:
+        res = await asyncio.wait_for(swarmd.send_intent("reconcile_now", {}), timeout=180.0)
+    except TimeoutError as e:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="reconcile timed out after 180s; check swarmd logs and retry",
+        ) from e
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"swarmd reconcile failed: {e}",
+        ) from e
+    report = res.get("reconcile", {})
+
+    containers: list[dict[str, Any]] = []
+    try:
+        ps = await swarmd.send_intent("get_ps", {})
+        containers = ps.get("containers", [])
+    except Exception as e:
+        logger.debug("post-reconcile get_ps failed: %s", e)
+
+    query = "SELECT service_id FROM installed_services WHERE status = 'running'"
+    async with db.conn.execute(query) as cur:
+        rows = await cur.fetchall()
+        installed_running = [r["service_id"] for r in rows]
+    drift_info = compute_drift(installed_running, containers)
+
+    audit_logger = AuditLogger(db.conn)
+    await audit_logger.log(
+        actor=user.username,
+        action="reconcile_now",
+        details={
+            "action": report.get("action"),
+            "repaired": report.get("repaired", []),
+            "still_missing": report.get("still_missing", []),
+        },
+    )
+
+    return {
+        "reconcile": report,
+        "drift_after": drift_info["drift"],
+        "degraded": drift_info["degraded"],
+        "running": drift_info["running"],
     }
 
 
@@ -203,9 +388,7 @@ async def tear_down_services(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    query = (
-        "UPDATE installed_services SET status = 'stopped', updated_at = CURRENT_TIMESTAMP"
-    )
+    query = "UPDATE installed_services SET status = 'stopped', updated_at = CURRENT_TIMESTAMP"
     await db.conn.execute(query)
     await db.conn.commit()
 
@@ -222,6 +405,7 @@ async def test_service(
 ):
     """Runs automated diagnostics and smoke test against a running engine container."""
     from panel_api.smoke_test import SmokeTestRunner
+
     result = await SmokeTestRunner.run(service_id)
     return result
 
@@ -233,6 +417,7 @@ async def test_all_services(
 ):
     """Runs automated smoke tests across all currently running engines."""
     from panel_api.smoke_test import SmokeTestRunner
+
     query = "SELECT service_id FROM installed_services WHERE status != 'stopped'"
     async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
@@ -268,10 +453,7 @@ async def restart_service(
         params = json.loads(row["params"] or "{}")
 
     # Merge active services and re-apply
-    query = (
-        "SELECT service_id, profile, params FROM installed_services "
-        "WHERE status != 'stopped'"
-    )
+    query = "SELECT service_id, profile, params FROM installed_services WHERE status != 'stopped'"
     async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
         wanted_payload = {
@@ -282,4 +464,3 @@ async def restart_service(
 
     res = await swarmd.send_intent("apply_stack", {"wanted": wanted_payload})
     return {"ok": True, "output": res.get("output", "")}
-

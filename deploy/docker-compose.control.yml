@@ -61,6 +61,11 @@ services:
     restart: unless-stopped
     security_opt:
       - label:disable
+    environment:
+      # Phase 02-infra-reconcile: background drift-repair loop. Set to 0 to
+      # disable (operator re-deploy / POST /services/reconcile still work).
+      - SWARM_RECONCILE_INTERVAL_S=60
+      - SWARM_RECONCILE_BOOT_DELAY_S=15
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - swarm_data:/var/lib/scraper-swarm

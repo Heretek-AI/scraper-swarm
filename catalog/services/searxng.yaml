@@ -14,6 +14,13 @@ networks: [svc, egress-web]
 requires: [valkey]
 port: 8080
 hardening: { user: "977:977", read_only: false, tmpfs: ["/tmp"] }
+# Phase 02-infra-reconcile: liveness probe for health-driven restart.
+# Loopback MUST bypass the egress proxy env (NO_PROXY covers in-stack
+# peers, not localhost) or the probe gets Smokescreen 407 and flaps.
+# Verified live: direct wget on :8080 is HTTP 200.
+health:
+  test: ["CMD-SHELL", "env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy wget -q -O /dev/null http://localhost:8080/ || exit 1"]
+  interval: 30s
 secrets: [SEARXNG_SECRET]
 volumes: ["config:/etc/searxng"]
 native_exposable: false

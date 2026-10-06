@@ -75,6 +75,51 @@ class DockerOrchestrator:
             logger.warning("Failed to get container status: %s", e)
             return []
 
+    async def ps_all(self) -> list[dict[str, Any]]:
+        """Returns ALL containers (running + stopped) for drift detection.
+
+        Phase 02-infra-reconcile (evidence:
+        file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json):
+        plain ``ps`` hides exited containers, so drift between the DB
+        ``running`` rows and Docker is invisible. ``ps -a`` distinguishes
+        ``missing`` from ``exited``/``dead`` for the reconciler.
+        """
+        if not self.compose_file.exists():
+            return []
+        output = await self._run_command(["ps", "-a", "--format", "json"])
+        if not output:
+            return []
+        containers = []
+        for line in output.splitlines():
+            if line.strip():
+                containers.append(json.loads(line))
+        return containers
+
+    async def ensure_up(self) -> str:
+        """Idempotent repair: recreates missing/stopped containers.
+
+        Phase 02-infra-reconcile: the reconciler calls this after drift is
+        detected. ``up -d --remove-orphans`` leaves healthy containers
+        untouched and never includes secrets on the command line (they stay
+        in 0600 env_files under the stack dir).
+        """
+        return await self._run_command(["up", "-d", "--remove-orphans"])
+
+    async def restart(self, service: str) -> str:
+        """Health-driven restart of one engine-stack service.
+
+        Phase 02-infra-reconcile: ``up -d`` does not recycle running-but-
+        ``unhealthy`` containers, so the reconciler restarts them
+        explicitly. ``docker compose restart`` only ever touches services
+        of this project, and the name is allowlisted to container-name
+        characters (defense in depth; argv is never shelled).
+        """
+        import re
+
+        if not re.fullmatch(r"[a-z][a-z0-9-]{1,40}", service):
+            raise DockerExecutionError(f"Refusing to restart invalid service name: {service!r}")
+        return await self._run_command(["restart", service])
+
     async def get_logs(self, service_name: str, lines: int = 100) -> str:
         """Safely fetches logs for a specific service."""
         return await self._run_command(["logs", "--tail", str(lines), service_name])
@@ -84,4 +129,3 @@ class DockerOrchestrator:
         if not self.compose_file.exists():
             return ""
         return self.compose_file.read_text(encoding="utf-8")
-
