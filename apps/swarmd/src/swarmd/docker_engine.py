@@ -121,8 +121,27 @@ class DockerOrchestrator:
         return await self._run_command(["restart", service])
 
     async def get_logs(self, service_name: str, lines: int = 100) -> str:
-        """Safely fetches logs for a specific service."""
-        return await self._run_command(["logs", "--tail", str(lines), service_name])
+        """Safely fetches logs for a specific service.
+
+        Phase 02-infra-reconcile retry1 QA-B #7: ``lines`` is bounded to
+        1..1000 (rejects negative/huge/non-int to avoid resource
+        exhaustion) and the service name is allowlisted to
+        container-name characters (defense in depth; argv is never
+        shelled). Docker's raw stderr is never returned to callers
+        (logged server-side instead) so log fetches cannot be used as an
+        error-text oracle.
+        """
+        import re
+
+        if not re.fullmatch(r"[a-z][a-z0-9-]{1,40}", service_name or ""):
+            raise DockerExecutionError("Refusing to fetch logs for invalid service name")
+        try:
+            n = int(lines)
+        except (TypeError, ValueError) as e:
+            raise DockerExecutionError("Refusing to fetch logs: lines must be 1..1000") from e
+        if n < 1 or n > 1000:
+            raise DockerExecutionError("Refusing to fetch logs: lines must be 1..1000")
+        return await self._run_command(["logs", "--tail", str(n), service_name])
 
     def get_compose_content(self) -> str:
         """Returns the raw YAML content of docker-compose.yml if present."""

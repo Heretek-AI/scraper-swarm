@@ -26,9 +26,12 @@ from .docker_engine import DockerOrchestrator
 from .reconciler import (
     Reconciler,
     clear_wanted,
+    load_history,
     load_last_report,
     load_wanted,
+    reset_repair_backoff,
     save_wanted,
+    wanted_corrupt_reason,
 )
 from .render import Selection, render_stack
 
@@ -234,6 +237,8 @@ class SwarmdServer:
             output = await self.orchestrator.write_and_apply(compose)
             # Phase 02-infra-reconcile: persist desired state so the
             # background loop (and post-restart boot pass) can repair drift.
+            # Retry1 QA-B #1: a fresh deploy resets the suspend backoff so a
+            # fixed daemon resumes auto-repair instead of staying suspended.
             save_wanted(
                 self.stack_dir,
                 {
@@ -241,6 +246,7 @@ class SwarmdServer:
                     for sid, sel in wanted.items()
                 },
             )
+            reset_repair_backoff(self.stack_dir)
             return {"compose": compose, "output": output}
         elif intent == "down_stack":
             output = await self.orchestrator.down()
@@ -259,20 +265,30 @@ class SwarmdServer:
         elif intent == "reconcile_now":
             # Phase 02-infra-reconcile: on-demand drift repair (serialized
             # with the background loop; may take ~1-2 min on image pulls).
+            # Retry1 QA-B #1: payload {"force": true} (sent by
+            # POST /services/reconcile) allows one repair attempt even when
+            # auto-repair is suspended; the report carries forced/resume_note
+            # for the audit trail.
+            force = bool(payload.get("force", False))
             async with self._reconcile_lock:
-                report = await self.reconciler.run_pass()
+                report = await self.reconciler.run_pass(force=force)
             return {"reconcile": report}
         elif intent == "get_reconcile_status":
             # Phase 02-infra-reconcile: fast read-only status for
             # GET /services/status (no docker calls, no repair).
             last = load_last_report(self.stack_dir)
             wanted_doc = load_wanted(self.stack_dir)
+            corrupt = wanted_corrupt_reason(self.stack_dir)
+            history = load_history(self.stack_dir, limit=5)
             return {
                 "reconcile": {
                     "enabled": wanted_doc is not None and self.reconciler.interval_s > 0,
                     "interval_s": self.reconciler.interval_s,
                     "wanted_updated_at": (wanted_doc or {}).get("updated_at"),
+                    "wanted_corrupt": corrupt,
                     "last": last,
+                    "history_len": len(load_history(self.stack_dir, limit=50)),
+                    "history_tail": history,
                 }
             }
         elif intent == "restart_service":
@@ -284,10 +300,27 @@ class SwarmdServer:
             output = await self.orchestrator.restart(service)
             return {"output": output}
         elif intent == "get_logs":
+            # Phase 02-infra-reconcile retry1 QA-B #7: bound lines 1..1000,
+            # allowlist the service name, and never return raw docker stderr
+            # to the caller (log it server-side instead).
+            import re as _re
+
             service = payload.get("service")
             if not service:
                 raise ValueError("Missing 'service' in payload for get_logs")
-            logs = await self.orchestrator.get_logs(service, lines=payload.get("lines", 100))
+            if not _re.fullmatch(r"[a-z][a-z0-9-]{1,40}", str(service)):
+                raise ValueError("Invalid service name for get_logs")
+            try:
+                n = int(payload.get("lines", 100))
+            except (TypeError, ValueError) as e:
+                raise ValueError("lines must be 1..1000") from e
+            if n < 1 or n > 1000:
+                raise ValueError("lines must be 1..1000")
+            try:
+                logs = await self.orchestrator.get_logs(str(service), lines=n)
+            except Exception as e:
+                logger.warning("get_logs failed for %s: %s", service, e)
+                raise ValueError("log fetch failed") from None
             return {"logs": logs}
         elif intent == "get_compose":
             content = self.orchestrator.get_compose_content()
