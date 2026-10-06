@@ -1,0 +1,29 @@
+{
+  "phase": "01-live-smoke",
+  "goal": "P1 Live Engine Stack Smoke Test: verify Agent->MCP Gateway->SearXNG/Crawl4AI->Smokescreen->Internet end-to-end search+crawl with SSRF fail-closed proof",
+  "evidence": [
+    {"hash": "file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2", "quote": "Spin up SearXNG + Crawl4AI + Smokescreen; Verify MCP Gateway query execution"},
+    {"hash": "file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/walkthrough.md::smoke-3-3", "quote": "searxng latency_ms 208 JSON Search API Query Returned 0 results (HTTP 200); crawl4ai 99ms Browser pool ready; egress-guard 26ms Blocked metadata request with HTTP 407"},
+    {"hash": "file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/workbench_fix_walkthrough.md::mcp-proof", "quote": "web_search open source search cluster architecture via /mcp; fetch_page https://example.com scraped markdown This domain is for use in documentation examples"},
+    {"hash": "file:///home/john/Projects/scraper-swarm/catalog/services/searxng.yaml", "quote": "SearXNG catalog entry with Valkey + egress-web wiring"},
+    {"hash": "file:///home/john/Projects/scraper-swarm/catalog/services/crawl4ai.yaml", "quote": "Crawl4AI catalog entry with CRAWL4AI_ALLOW_INTERNAL_URLS delegation to Smokescreen"},
+    {"hash": "file:///home/john/Projects/scraper-swarm/catalog/services/egress-web.yaml", "quote": "Smokescreen egress-web SSRF firewall denying RFC1918 + 169.254.169.254"},
+    {"hash": "file:///home/john/Projects/scraper-swarm/apps/panel-api/src/panel_api/smoke_test.py", "quote": "SmokeTestRunner.test_searxng / test_crawl4ai / egress diagnostics"},
+    {"hash": "file:///home/john/Projects/scraper-swarm/tests/security/test_ssrf.py", "quote": "SSRF suite asserting 169.254.169.254, 127.0.0.1, 10/172.16/192.168, 100.64 blocked and public allowed"}
+  ],
+  "acceptance": [
+    "web_search via live /mcp returns SearXNG JSON HTTP 200 with latency",
+    "fetch_page via live /mcp returns Crawl4AI markdown for https://example.com with sentinel text",
+    "Smokescreen blocks 169.254.169.254 + RFC1918 with 407/403; public example.com allowed",
+    "swarmd rendered compose is policy-compliant (non-root, cap_drop ALL, internal nets)",
+    "POST /services/test-all reports 3/3 pass; no secrets in logs/audit",
+    "catalog remains 10 entries; pytest suite green or deltas explained"
+  ],
+  "brief": "Strict brief: make P1 live-verifiable only (diagnostics/gateway/compose/harness fixes). Cite phase hashes. No swarms, no sibling programmers. See GOAL.md.",
+  "verdict": "briefed-awaiting-programmer-approval",
+  "hashes": [
+    "file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2",
+    "file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/walkthrough.md::smoke-3-3",
+    "file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/workbench_fix_walkthrough.md::mcp-proof"
+  ]
+}
