@@ -30,6 +30,65 @@ from urllib.parse import urlsplit
 # no-secrets-in-logs/audit invariant.
 _SENSITIVE_KEY_PARTS = ("token", "secret", "password", "authorization", "bearer", "cookie")
 
+# Phase 03 retry1 QA-B: search/research actions carry free-text queries, not
+# URLs. Redacting them as URLs destroys forensics ("(invalid-url)").
+_SEARCH_QUERY_ACTIONS = frozenset({"web_search", "deep_research"})
+
+
+def is_expiry_passed(expires_at: str | None) -> bool:
+    """Timezone-aware expiry check shared by gateway + panel-api sessions.
+
+    ``None``/empty means no expiry (valid). Unparseable values fail closed
+    (treated as expired) so a corrupt timestamp never grants access.
+    """
+    if not expires_at:
+        return False
+    try:
+        from datetime import UTC, datetime
+
+        exp = datetime.fromisoformat(str(expires_at))
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=UTC)
+        return exp <= datetime.now(UTC)
+    except Exception:
+        return True
+
+
+def audit_target_for_action(action: str, target: str | None) -> str | None:
+    """Preserves search/research query text; redacts only true URLs.
+
+    For ``web_search``/``deep_research`` the target is a free-text query and
+    must be kept verbatim (truncated) for forensics — secrets are handled by
+    never logging bearer material elsewhere. If the query itself embeds a URL
+    (contains ``://`` and redacts to a real host), the redacted URL form is
+    stored; otherwise the raw query is preserved. All other actions (fetch /
+    scrape plus denied/unknown-tool method names) go through
+    :func:`redact_url_for_audit`, but a non-URL target that would otherwise
+    become ``(invalid-url)`` is preserved verbatim (truncated) so denied rows
+    keep their method/tool forensics instead of evidence-loss.
+    """
+    if target is None:
+        return None
+    text = str(target).strip()
+    if not text:
+        return None
+    if action in _SEARCH_QUERY_ACTIONS:
+        if "://" in text:
+            redacted = redact_url_for_audit(text)
+            if redacted != "(invalid-url)":
+                return redacted
+        if len(text) > 2000:
+            text = text[:2000] + "…[truncated]"
+        return text
+    redacted = redact_url_for_audit(text)
+    if redacted != "(invalid-url)":
+        return redacted
+    # Non-URL forensics (tool/method names like "nope_tool", "tools/list"):
+    # preserve verbatim truncated rather than destroying to invalid-url.
+    if len(text) > 2000:
+        text = text[:2000] + "…[truncated]"
+    return text
+
 
 def sanitize_details(details: dict | None) -> dict:
     """Redacts secret-looking values from an audit details mapping."""

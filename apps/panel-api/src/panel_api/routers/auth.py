@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
 import pyotp
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from panel_api.audit import AuditLogger
 from panel_api.db import Database
+from panel_api.ssrf_guard import is_expiry_passed
 from panel_api.vault import Vault
 from pydantic import BaseModel, Field
 
@@ -21,8 +23,8 @@ BOOTSTRAP_STATE_KEY = "bootstrap_token"
 SETUP_COMPLETED_KEY = "setup_completed"
 SESSION_COOKIE_NAME = "swarm_session"
 
-# In-memory session store: session_token -> {"user_id": ..., "role": ..., "username": ...}
-SESSIONS: dict[str, dict[str, str]] = {}
+# In-memory session store: token -> user/role/username/expires_at
+SESSIONS: dict[str, dict[str, str | None]] = {}
 
 
 class BootstrapInitRequest(BaseModel):
@@ -59,11 +61,13 @@ def get_db(response: Response) -> Database:
     )
     # Inject via app state in real runtime
     from panel_api.main import app_state
+
     return app_state.db
 
 
 def get_vault() -> Vault:
     from panel_api.main import app_state
+
     return app_state.vault
 
 
@@ -77,6 +81,23 @@ async def get_current_user(
         )
     if swarm_session in SESSIONS:
         data = SESSIONS[swarm_session]
+        # Phase 03 retry1 QA-B P0-1: in-memory sessions honor expires_at.
+        if is_expiry_passed(data.get("expires_at")):
+            del SESSIONS[swarm_session]
+            from panel_api.main import app_state as _state
+
+            if _state and _state.db and _state.db.conn:
+                try:
+                    await _state.db.conn.execute(
+                        "DELETE FROM sessions WHERE token = ?", (swarm_session,)
+                    )
+                    await _state.db.conn.commit()
+                except Exception as e:
+                    logger.debug("Expired session cleanup failed: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session expired",
+            )
         return SessionInfo(
             user_id=data["user_id"],
             username=data["username"],
@@ -85,24 +106,46 @@ async def get_current_user(
 
     # Check persistent database
     from panel_api.main import app_state
+
     if app_state and app_state.db and app_state.db.conn:
         try:
             async with app_state.db.conn.execute(
-                "SELECT user_id, username, role FROM sessions WHERE token = ?",
+                "SELECT user_id, username, role, expires_at FROM sessions WHERE token = ?",
                 (swarm_session,),
             ) as cur:
                 row = await cur.fetchone()
                 if row:
+                    try:
+                        sess_expires = row["expires_at"]
+                    except (KeyError, IndexError):
+                        sess_expires = None
+                    # Phase 03 retry1 QA-B P0-1: expired DB sessions fail
+                    # closed with 401 (timezone-aware; unparseable = expired).
+                    if sess_expires and is_expiry_passed(str(sess_expires)):
+                        try:
+                            await app_state.db.conn.execute(
+                                "DELETE FROM sessions WHERE token = ?", (swarm_session,)
+                            )
+                            await app_state.db.conn.commit()
+                        except Exception as e:
+                            logger.debug("Expired session cleanup failed: %s", e)
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Session expired",
+                        )
                     SESSIONS[swarm_session] = {
                         "user_id": row["user_id"],
                         "username": row["username"],
                         "role": row["role"],
+                        "expires_at": row["expires_at"] if "expires_at" in row else None,  # noqa: SIM401
                     }
                     return SessionInfo(
                         user_id=row["user_id"],
                         username=row["username"],
                         role=row["role"],  # type: ignore
                     )
+        except HTTPException:
+            raise
         except Exception as e:
             logger.debug("Database session lookup error: %s", e)
 
@@ -120,6 +163,7 @@ def require_role(*allowed_roles: str):
                 detail=f"Permission denied. Role '{user.role}' not permitted.",
             )
         return user
+
     return _role_checker
 
 
@@ -213,9 +257,7 @@ async def verify_totp(
 
     # Enable TOTP and mark setup complete if not already enabled
     if not row["totp_enabled"]:
-        await db.conn.execute(
-            "UPDATE users SET totp_enabled = 1 WHERE id = ?", (user_id,)
-        )
+        await db.conn.execute("UPDATE users SET totp_enabled = 1 WHERE id = ?", (user_id,))
         await db.conn.execute(
             "INSERT OR REPLACE INTO system_state (key, value) VALUES (?, 'true')",
             (SETUP_COMPLETED_KEY,),
@@ -224,17 +266,20 @@ async def verify_totp(
         await db.conn.execute("DELETE FROM system_state WHERE key = ?", (BOOTSTRAP_STATE_KEY,))
         await db.conn.commit()
 
-    # Generate secure random session token
+    # Generate secure random session token (24h TTL, persisted for gateway/panel expiry checks).
     session_token = secrets.token_urlsafe(32)
+    session_expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
     SESSIONS[session_token] = {
         "user_id": user_id,
         "username": row["username"],
         "role": row["role"],
+        "expires_at": session_expires_at,
     }
 
     await db.conn.execute(
-        "INSERT OR REPLACE INTO sessions (token, user_id, username, role) VALUES (?, ?, ?, ?)",
-        (session_token, user_id, row["username"], row["role"]),
+        "INSERT OR REPLACE INTO sessions (token, user_id, username, role, expires_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (session_token, user_id, row["username"], row["role"], session_expires_at),
     )
     await db.conn.commit()
 

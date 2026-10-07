@@ -17,6 +17,15 @@
  * interactive path: it POSTs JSON-RPC `tools/call` to `/mcp` directly, so its
  * traffic always flows through gateway auth, scope checks, SSRF pre-deny,
  * and hash-chained audit. Unit proof lives in `src/index.test.ts` (vitest).
+ *
+ * Retry1 QA-B P0-4: matching is case-insensitive and covers alias variants
+ * (web_fetch, web-fetch, curl, wget, ...). Shell tools (bash/shell/exec)
+ * carrying fetch-like args (curl/wget/URLs) are blocked as well; plain shell
+ * use without network intent still passes. Rationale: bash/curl are the
+ * documented bypass vector, so they are denied only when args show network
+ * fetch intent — blocking all shell use would break legitimate commands.
+ * Block messages are generic (tool name only, never the URL) so secret-bearing
+ * query strings are never echoed into error text.
  */
 
 export interface PluginContext {
@@ -27,17 +36,58 @@ export interface PluginContext {
   worktree?: string;
 }
 
+function normalizeToolName(tool: string): string {
+  return (tool || "").toLowerCase().replace(/[-_\s]/g, "");
+}
+
+// Direct-fetch tool aliases (normalized: lowercase, no -/_). Any name
+// containing fetch/curl/wget is treated as a fetch tool as a fail-closed
+// catch-all for future variants.
+const SHELL_TOOLS = new Set(["bash", "shell", "exec", "command", "terminal", "sh", "zsh"]);
+
+function isFetchTool(normalized: string): boolean {
+  if (normalized.includes("fetch")) return true;
+  if (normalized.includes("curl")) return true;
+  if (normalized.includes("wget")) return true;
+  return false;
+}
+
+function shellArgsLookLikeFetch(args: Record<string, any>): boolean {
+  try {
+    const blob = JSON.stringify(args || {}).toLowerCase();
+    return (
+      blob.includes("curl") ||
+      blob.includes("wget") ||
+      blob.includes("http://") ||
+      blob.includes("https://") ||
+      blob.includes("webfetch")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function blockedMessage(tool: string): string {
+  return (
+    `[Scraper Swarm Guard] Direct web fetch via tool '${tool}' is blocked by security policy. ` +
+    `Use the swarm_fetch / scraper-swarm MCP tool to route through egress controls and SSRF filters.`
+  );
+}
+
 export const ScraperSwarmPlugin = async (ctx: PluginContext) => {
   return {
     "tool.execute.before": async (input: { tool: string }, output: { args: Record<string, any> }) => {
-      // Guard against direct unmonitored agent web fetching:
-      // If agent attempts raw web fetch, block it and direct them to swarm_fetch / MCP gateway
-      if (input.tool === "webfetch" || input.tool === "fetch") {
-        const url = output.args?.url || output.args?.uri || "unknown";
-        throw new Error(
-          `[Scraper Swarm Guard] Direct web fetch to "${url}" is blocked by security policy. ` +
-          `Use the swarm_fetch / scraper-swarm MCP tool to route through egress controls and SSRF filters.`
-        );
+      const rawTool = input.tool || "";
+      const normalized = normalizeToolName(rawTool);
+      // 1. Direct fetch-tool aliases, case-insensitive (WebFetch/WEBFETCH/web_fetch/...).
+      if (isFetchTool(normalized)) {
+        throw new Error(blockedMessage(rawTool));
+      }
+      // 2. Shell bypass: bash/shell/exec with fetch-like args (curl/wget/URL).
+      if (SHELL_TOOLS.has(normalized) || SHELL_TOOLS.has(rawTool.toLowerCase())) {
+        if (shellArgsLookLikeFetch(output.args)) {
+          throw new Error(blockedMessage(rawTool));
+        }
       }
     },
 

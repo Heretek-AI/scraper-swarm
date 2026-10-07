@@ -94,3 +94,29 @@ def test_audit_redaction_preserves_no_secrets_invariant():
     target = redact_url_for_audit("https://user:pass@example.com/p?q=1#frag")
     assert "pass" not in target and "q=1" not in target
     assert "example.com" in target
+
+
+def test_audit_target_preserves_search_query_not_invalid_url():
+    """Retry1 P0-3: search/research queries preserved; fetch URLs redacted; denied kept."""
+    from panel_api.ssrf_guard import audit_target_for_action
+
+    assert audit_target_for_action("web_search", "forensic query hello") == "forensic query hello"
+    assert audit_target_for_action("deep_research", "what is XYZ?") == "what is XYZ?"
+    # true URLs still redacted (no userinfo/query/fragment)
+    redacted = audit_target_for_action("fetch_page", "https://user:pass@example.com/p?q=1#frag")
+    assert "example.com" in redacted and "pass" not in redacted and "q=1" not in redacted
+    # denied method/tool names preserved (not invalid-url)
+    assert audit_target_for_action("unknown_tool", "nope_tool_xyz") == "nope_tool_xyz"
+    assert audit_target_for_action("auth_denied", "tools/list") == "tools/list"
+
+
+def test_is_expiry_passed_timezone_aware_fail_closed():
+    from panel_api.ssrf_guard import is_expiry_passed
+
+    assert is_expiry_passed(None) is False
+    assert is_expiry_passed("2000-01-01T00:00:00+00:00") is True
+    assert is_expiry_passed("2099-01-01T00:00:00+00:00") is False
+    # naive timestamps treated as UTC
+    assert is_expiry_passed("2000-01-01T00:00:00") is True
+    # unparseable fails closed
+    assert is_expiry_passed("not-a-date") is True

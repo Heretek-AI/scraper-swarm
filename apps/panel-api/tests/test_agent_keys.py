@@ -151,3 +151,87 @@ async def test_revoked_key_disappears_from_list(authed_client):
     r = await client.get("/agents/keys")
     assert all(k["id"] != key_id for k in r.json())
     assert (await client.delete(f"/agents/keys/{key_id}")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_create_key_rejects_duplicate_name_409(authed_client):
+    """Retry1 P0-5: duplicate key names rejected with 409."""
+    client, _ = authed_client
+    r = await client.post("/agents/keys", json={"name": "dup-key-1", "scopes": ["search"]})
+    assert r.status_code == 200
+    r = await client.post("/agents/keys", json={"name": "dup-key-1", "scopes": ["search"]})
+    assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_create_key_dedupes_scopes(authed_client):
+    """Retry1 P0-5: duplicate scopes deduped preserving order."""
+    client, _ = authed_client
+    r = await client.post(
+        "/agents/keys", json={"name": "dedupe-key-1", "scopes": ["search", "search", "scrape"]}
+    )
+    assert r.status_code == 200
+    assert r.json()["scopes"] == ["search", "scrape"]
+
+
+@pytest.mark.asyncio
+async def test_create_key_infinite_requires_ack_and_defaults_ttl(authed_client):
+    """Retry1 P0-5: None without ack -> 422; default TTL finite; ack allows infinite."""
+    client, _ = authed_client
+    r = await client.post(
+        "/agents/keys", json={"name": "inf-noack", "scopes": ["search"], "expires_in_hours": None}
+    )
+    assert r.status_code == 422
+    r = await client.post("/agents/keys", json={"name": "default-ttl", "scopes": ["search"]})
+    assert r.status_code == 200
+    assert r.json()["expires_at"] is not None
+    r = await client.post(
+        "/agents/keys",
+        json={
+            "name": "inf-ack",
+            "scopes": ["search"],
+            "expires_in_hours": None,
+            "allow_never_expire": True,
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["expires_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_snippet_placeholder_warns_when_host_unconfigured(authed_client, monkeypatch):
+    """Retry1 P0-5: placeholder host conspicuous + warning, bound at request time."""
+    client, _ = authed_client
+    monkeypatch.delenv("SWARM_PUBLIC_MCP_URL", raising=False)
+    r = await client.post("/agents/keys", json={"name": "snippet-place", "scopes": ["search"]})
+    assert r.status_code == 200
+    snippet = r.json()["opencode_snippet"]
+    assert snippet["mcp"]["scraper-swarm"]["url"].endswith("/mcp")
+    assert "REPLACE-ME" in snippet["mcp"]["scraper-swarm"]["url"]
+    assert "warning" in snippet
+    monkeypatch.setenv("SWARM_PUBLIC_MCP_URL", "https://myhost.local/mcp")
+    r = await client.post("/agents/keys", json={"name": "snippet-real", "scopes": ["search"]})
+    assert r.json()["opencode_snippet"]["mcp"]["scraper-swarm"]["url"] == "https://myhost.local/mcp"
+    assert "warning" not in r.json()["opencode_snippet"]
+
+
+@pytest.mark.asyncio
+async def test_panel_session_expiry_401(authed_client):
+    """Retry1 P0-1: panel get_current_user honors expired sessions with 401."""
+    from panel_api.routers.auth import SESSIONS
+
+    client, db = authed_client
+    # Insert an expired DB session (bypass in-memory cache).
+    await db.conn.execute(
+        "INSERT INTO users (id, username, role) VALUES ('u-exp-panel', 'exp_panel', 'viewer')"
+    )
+    await db.conn.execute(
+        "INSERT INTO sessions (token, user_id, username, role, expires_at)"
+        " VALUES ('sess-panel-expired', 'u-exp-panel', 'exp_panel', 'viewer',"
+        " '2000-01-01T00:00:00+00:00')",
+    )
+    await db.conn.commit()
+    SESSIONS.pop("sess-panel-expired", None)
+    client.cookies.set("swarm_session", "sess-panel-expired")
+    r = await client.get("/auth/me")
+    assert r.status_code == 401

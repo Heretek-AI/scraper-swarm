@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS agent_keys (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     key_hash TEXT UNIQUE NOT NULL, -- SHA-256 hash of the bearer token
-    key_prefix TEXT NOT NULL, -- First 8 chars for user display
+    key_prefix TEXT NOT NULL, -- First 14 chars for user display (raw_key[:14] + "...")
     scopes TEXT NOT NULL,     -- JSON array of scopes, e.g. ["search", "scrape"]
     rate_limit_rpm INTEGER DEFAULT 60,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

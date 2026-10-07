@@ -14,7 +14,7 @@ describe("ScraperSwarmPlugin", () => {
 
     await expect(
       guard({ tool: "webfetch" }, { args: { url: "http://169.254.169.254/latest/meta-data" } })
-    ).rejects.toThrowError(/Direct web fetch to .* is blocked by security policy/);
+    ).rejects.toThrowError(/Direct web fetch via tool.*is blocked by security policy/);
 
     await expect(
       guard({ tool: "fetch" }, { args: { url: "https://example.com" } })
@@ -29,5 +29,44 @@ describe("ScraperSwarmPlugin", () => {
     await expect(
       guard({ tool: "read" }, { args: { path: "main.py" } })
     ).resolves.toBeUndefined();
+  });
+
+  it("blocks case-variant and alias bypasses (WebFetch/WEBFETCH/web_fetch/curl)", async () => {
+    const plugin = await ScraperSwarmPlugin({});
+    const guard = plugin["tool.execute.before"];
+    for (const tool of ["WebFetch", "WEBFETCH", "web_fetch", "web-fetch", "Web_Fetch", "FETCH", "curl", "Curl", "CURL", "wget", "Wget"]) {
+      await expect(
+        guard({ tool }, { args: { url: "https://example.com" } })
+      ).rejects.toThrowError(/is blocked by security policy/);
+    }
+  });
+
+  it("blocks shell bypass carrying fetch intent but allows plain shell", async () => {
+    const plugin = await ScraperSwarmPlugin({});
+    const guard = plugin["tool.execute.before"];
+    await expect(
+      guard({ tool: "bash" }, { args: { command: "curl https://example.com/secret" } })
+    ).rejects.toThrowError(/swarm_fetch/);
+    await expect(
+      guard({ tool: "shell" }, { args: { command: "wget http://example.com/x" } })
+    ).rejects.toThrowError(/swarm_fetch/);
+    // Plain shell without network intent passes.
+    await expect(
+      guard({ tool: "bash" }, { args: { command: "ls -la" } })
+    ).resolves.toBeUndefined();
+  });
+
+  it("never echoes secret-bearing URLs in the block message", async () => {
+    const plugin = await ScraperSwarmPlugin({});
+    const guard = plugin["tool.execute.before"];
+    const secretUrl = "https://example.com/?token=SECRET123&x=1";
+    try {
+      await guard({ tool: "WebFetch" }, { args: { url: secretUrl } });
+      expect.unreachable();
+    } catch (e: any) {
+      expect(String(e.message)).toContain("swarm_fetch");
+      expect(String(e.message)).not.toContain("SECRET123");
+      expect(String(e.message)).not.toContain(secretUrl);
+    }
   });
 });

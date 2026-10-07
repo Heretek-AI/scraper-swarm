@@ -403,3 +403,136 @@ async def test_gateway_audit_rows_carry_no_secrets(test_env):
         assert key_hash not in blob
         assert "Bearer" not in blob
     assert any(str(r["actor"]).startswith("agent:") for r in rows)
+
+
+# Phase 03 retry1 QA-B P0-1/P0-2/P0-3: session expiry 401, session 429, audit
+# query preserved + denied rows. Evidence hashes in module docstring above.
+
+@pytest.mark.asyncio
+async def test_gateway_expired_session_401(test_env):
+    """Retry1 P0-1: expired swarm_session (sess-expired) fails closed with 401."""
+    client, _, db = test_env
+    await db.conn.execute(
+        "INSERT INTO users (id, username, role) VALUES ('u-exp-1', 'exp_user', 'admin')"
+    )
+    await db.conn.execute(
+        "INSERT INTO sessions (token, user_id, username, role, expires_at)"
+        " VALUES ('sess-expired', 'u-exp-1', 'exp_user', 'admin', '2000-01-01T00:00:00+00:00')",
+    )
+    await db.conn.execute(
+        "INSERT INTO sessions (token, user_id, username, role, expires_at)"
+        " VALUES ('sess-valid', 'u-exp-1', 'exp_user', 'admin', '2099-01-01T00:00:00+00:00')",
+    )
+    await db.conn.commit()
+    r = await client.post(
+        "/mcp",
+        cookies={"swarm_session": "sess-expired"},
+        json={"jsonrpc": "2.0", "method": "tools/list", "id": 71},
+    )
+    assert r.status_code == 401
+    r = await client.post(
+        "/mcp",
+        cookies={"swarm_session": "sess-valid"},
+        json={"jsonrpc": "2.0", "method": "tools/list", "id": 72},
+    )
+    assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_gateway_session_rate_limit_429(test_env):
+    """Retry1 P0-2: session path enforces the same sliding-window bucket (viewer 60rpm)."""
+    client, _, db = test_env
+    await db.conn.execute(
+        "INSERT INTO users (id, username, role) VALUES ('u-rl-1', 'rl_viewer', 'viewer')"
+    )
+    await db.conn.execute(
+        "INSERT INTO sessions (token, user_id, username, role, expires_at)"
+        " VALUES ('sess-rl-viewer', 'u-rl-1', 'rl_viewer', 'viewer', '2099-01-01T00:00:00+00:00')",
+    )
+    await db.conn.commit()
+    body = {"jsonrpc": "2.0", "method": "tools/list", "id": 81}
+    statuses = []
+    for _ in range(65):
+        r = await client.post("/mcp", cookies={"swarm_session": "sess-rl-viewer"}, json=body)
+        statuses.append(r.status_code)
+    assert 429 in statuses
+
+
+@pytest.mark.asyncio
+async def test_gateway_audit_preserves_search_query(test_env):
+    """Retry1 P0-3: web_search/deep_research query text preserved (not invalid-url)."""
+    client, raw_key, db = test_env
+    headers = {"Authorization": f"Bearer {raw_key}"}
+    await client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "web_search", "arguments": {"query": "forensic query xyz123"}},
+            "id": 91,
+        },
+    )
+    async with db.conn.execute(
+        "SELECT target FROM audit_log WHERE action = 'web_search' ORDER BY id DESC LIMIT 1"
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    assert "forensic query xyz123" in (row["target"] or "")
+    assert row["target"] != "(invalid-url)"
+
+
+@pytest.mark.asyncio
+async def test_gateway_audit_logs_denied_calls(test_env):
+    """Retry1 P0-3: 401/403/429 + unknown-tool -32601 leave audit rows, chain green."""
+    client, raw_key, db = test_env
+    search_only_raw = "swarm_sec_deniedprobe01"
+    await _seed_agent_key(db, "k-denied-probe", search_only_raw, ["search"])
+    # 403: search-only key attempts scrape
+    r = await client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {search_only_raw}"},
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "fetch_page", "arguments": {"url": "https://example.com"}},
+            "id": 101,
+        },
+    )
+    assert r.status_code == 403
+    # 401: bad bearer
+    r = await client.post(
+        "/mcp",
+        headers={"Authorization": "Bearer bad_token_xyz"},
+        json={"jsonrpc": "2.0", "method": "tools/list", "id": 102},
+    )
+    assert r.status_code == 401
+    # unknown tool -32601
+    r = await client.post(
+        "/mcp",
+        headers={"Authorization": f"Bearer {raw_key}"},
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "nope_tool_xyz", "arguments": {}},
+            "id": 103,
+        },
+    )
+    assert r.json()["error"]["code"] == -32601
+    async with db.conn.execute("SELECT actor, action, target, details FROM audit_log") as cur:
+        rows = await cur.fetchall()
+    actions = [row["action"] for row in rows]
+    assert "fetch_page_denied" in actions
+    assert "auth_denied" in actions
+    assert "unknown_tool" in actions
+    assert all(str(r["actor"]).startswith("agent:") for r in rows)
+    # zero secrets + chain green
+    key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    for row in rows:
+        blob = f"{row['actor']} {row['action']} {row['target']} {row['details']}"
+        assert raw_key not in blob
+        assert key_hash not in blob
+        assert "Bearer" not in blob
+    from panel_api.audit import AuditLogger
+
+    assert await AuditLogger(db.conn).verify_chain() is True

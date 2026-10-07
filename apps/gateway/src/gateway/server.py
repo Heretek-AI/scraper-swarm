@@ -22,7 +22,12 @@ import httpx
 from fastapi import Cookie, FastAPI, Header, HTTPException, Request, status
 from mcp.server.mcpserver import MCPServer
 from panel_api.audit import AuditLogger
-from panel_api.ssrf_guard import deny_reason_for_url, redact_url_for_audit, sanitize_details
+from panel_api.ssrf_guard import (
+    audit_target_for_action,
+    deny_reason_for_url,
+    is_expiry_passed,
+    sanitize_details,
+)
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -38,6 +43,9 @@ mcp_server = MCPServer(name="ScraperSwarmGateway")
 # single-process guard (documents the rpm contract); operators needing
 # multi-replica enforcement put a shared bucket in Valkey (see docs note).
 _RATE_BUCKETS: dict[str, list[float]] = {}
+# Bound on distinct bucket keys so a cardinality flood cannot grow memory
+# without limit; overflow triggers a sweep of expired windows.
+_MAX_RATE_BUCKETS = 5000
 
 
 def _check_rate_limit(key_id: str, rpm: int) -> None:
@@ -46,12 +54,31 @@ def _check_rate_limit(key_id: str, rpm: int) -> None:
     window_start = now - 60.0
     hits = [t for t in _RATE_BUCKETS.get(key_id, []) if t > window_start]
     if len(hits) >= max(1, rpm):
+        # Persist the pruned window even on deny so the bucket cannot grow
+        # with stale timestamps, then bound total cardinality.
+        _RATE_BUCKETS[key_id] = hits
+        _prune_rate_buckets(window_start)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Rate limit exceeded ({rpm} req/min)",
         )
     hits.append(now)
     _RATE_BUCKETS[key_id] = hits
+    _prune_rate_buckets(window_start)
+
+
+def _prune_rate_buckets(window_start: float) -> None:
+    """Bounds bucket cardinality by sweeping expired windows on every path."""
+    if len(_RATE_BUCKETS) <= _MAX_RATE_BUCKETS:
+        return
+    for bucket_key in list(_RATE_BUCKETS.keys()):
+        remaining = [t for t in _RATE_BUCKETS[bucket_key] if t > window_start]
+        if remaining:
+            _RATE_BUCKETS[bucket_key] = remaining
+        else:
+            del _RATE_BUCKETS[bucket_key]
+    while len(_RATE_BUCKETS) > _MAX_RATE_BUCKETS:
+        _RATE_BUCKETS.pop(next(iter(_RATE_BUCKETS)))
 
 
 def _reset_rate_limits() -> None:
@@ -68,6 +95,11 @@ async def log_agent_activity(
     live /mcp calls actually persist ``agent:*`` rows; failures are surfaced
     as warnings (never silent debug) and details are sanitized so the
     no-secrets invariant holds while rows are written.
+
+    Phase 03 retry1 QA-B: search/research query text is preserved verbatim
+    (via :func:`audit_target_for_action`) for forensics; only true URLs are
+    redacted. Denied calls (401/403/429/unknown-tool) are logged with the
+    same sanitization so failures leave a trace.
     """
     if not os.path.exists(DB_PATH):
         log.warning("Agent activity audit skipped: database path %s missing", DB_PATH)
@@ -79,11 +111,24 @@ async def log_agent_activity(
             await logger.log(
                 actor=f"agent:{agent_name}",
                 action=action,
-                target=redact_url_for_audit(target) if target else None,
+                target=audit_target_for_action(action, target) if target else None,
                 details=sanitize_details(details),
             )
     except Exception as e:
         log.warning("Agent activity audit logging failed for %s/%s: %s", agent_name, action, e)
+
+
+async def _audit_denied(
+    agent_name: str | None,
+    action: str,
+    target: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort denied-call audit row; never raises (must not mask the error)."""
+    try:
+        await log_agent_activity(agent_name or "unknown", action, target=target, details=details)
+    except Exception as e:
+        log.warning("Denied-call audit failed for %s: %s", action, e)
 
 
 async def verify_agent_token(
@@ -181,8 +226,24 @@ async def verify_agent_token(
             ) as cur:
                 row = await cur.fetchone()
                 if row:
+                    # Phase 03 retry1 QA-B P0-1: expired sessions fail closed
+                    # with 401 (timezone-aware; unparseable fails closed).
+                    try:
+                        sess_expires = row["expires_at"]
+                    except (KeyError, IndexError):
+                        sess_expires = None
+                    if sess_expires and is_expiry_passed(str(sess_expires)):
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Session expired",
+                        )
                     role = row["role"]
                     if role in ("admin", "operator"):
+                        # Phase 03 retry1 QA-B P0-2: session path enforces the
+                        # same sliding-window bucket (keyed by session user)
+                        # so cookie auth cannot bypass rpm limits.
+                        if enforce_rate_limit:
+                            _check_rate_limit(f"session:{row['user_id']}", 600)
                         return {
                             "id": row["user_id"],
                             "name": row["username"],
@@ -192,6 +253,8 @@ async def verify_agent_token(
                         }
                     elif role == "viewer":
                         if required_scope == "search":
+                            if enforce_rate_limit:
+                                _check_rate_limit(f"session:{row['user_id']}", 60)
                             return {
                                 "id": row["user_id"],
                                 "name": row["username"],
@@ -314,13 +377,8 @@ def create_gateway_app() -> FastAPI:
     ):
         """Authenticated MCP Streamable HTTP endpoint supporting JSON-RPC 2.0."""
         cookie_val = swarm_session or request.cookies.get("swarm_session")
-        agent = await verify_agent_token(
-            auth_header=authorization,
-            cookie_token=cookie_val,
-            required_scope="search",
-        )
 
-        body = {}
+        body: dict[str, Any] = {}
         try:
             body = await request.json()
         except Exception as e:
@@ -328,6 +386,29 @@ def create_gateway_app() -> FastAPI:
 
         method = body.get("method")
         rpc_id = body.get("id", 1)
+        _attempted_tool: str | None = None
+        if isinstance(body.get("params"), dict):
+            _attempted_tool = body["params"].get("name")
+
+        try:
+            agent = await verify_agent_token(
+                auth_header=authorization,
+                cookie_token=cookie_val,
+                required_scope="search",
+            )
+        except HTTPException as e:
+            if e.status_code in (401, 403, 429):
+                await _audit_denied(
+                    None,
+                    "auth_denied",
+                    target=_attempted_tool or method,
+                    details={
+                        "status": e.status_code,
+                        "method": method,
+                        "tool": _attempted_tool,
+                    },
+                )
+            raise
 
         if method == "initialize":
             return {
@@ -432,12 +513,22 @@ def create_gateway_app() -> FastAPI:
                 }
 
             elif name == "fetch_page":
-                await verify_agent_token(
-                    auth_header=authorization,
-                    cookie_token=cookie_val,
-                    required_scope="scrape",
-                    enforce_rate_limit=False,
-                )
+                try:
+                    await verify_agent_token(
+                        auth_header=authorization,
+                        cookie_token=cookie_val,
+                        required_scope="scrape",
+                        enforce_rate_limit=False,
+                    )
+                except HTTPException as e:
+                    if e.status_code in (401, 403, 429):
+                        await _audit_denied(
+                            str(agent.get("name", "unknown")),
+                            "fetch_page_denied",
+                            target=args.get("url", ""),
+                            details={"status": e.status_code, "reason": e.detail},
+                        )
+                    raise
                 target_url = args.get("url", "")
                 await log_agent_activity(agent["name"], "fetch_page", target=target_url)
                 result = await fetch_page(url=target_url)
@@ -448,12 +539,22 @@ def create_gateway_app() -> FastAPI:
                 }
 
             elif name == "deep_research":
-                await verify_agent_token(
-                    auth_header=authorization,
-                    cookie_token=cookie_val,
-                    required_scope="search",
-                    enforce_rate_limit=False,
-                )
+                try:
+                    await verify_agent_token(
+                        auth_header=authorization,
+                        cookie_token=cookie_val,
+                        required_scope="search",
+                        enforce_rate_limit=False,
+                    )
+                except HTTPException as e:
+                    if e.status_code in (401, 403, 429):
+                        await _audit_denied(
+                            str(agent.get("name", "unknown")),
+                            "deep_research_denied",
+                            target=args.get("query", ""),
+                            details={"status": e.status_code, "reason": e.detail},
+                        )
+                    raise
                 q = args.get("query", "")
                 await log_agent_activity(agent["name"], "deep_research", target=q)
                 async with httpx.AsyncClient(timeout=120.0) as client:
@@ -471,12 +572,22 @@ def create_gateway_app() -> FastAPI:
                 }
 
             elif name == "stealth_scrape":
-                await verify_agent_token(
-                    auth_header=authorization,
-                    cookie_token=cookie_val,
-                    required_scope="scrape",
-                    enforce_rate_limit=False,
-                )
+                try:
+                    await verify_agent_token(
+                        auth_header=authorization,
+                        cookie_token=cookie_val,
+                        required_scope="scrape",
+                        enforce_rate_limit=False,
+                    )
+                except HTTPException as e:
+                    if e.status_code in (401, 403, 429):
+                        await _audit_denied(
+                            str(agent.get("name", "unknown")),
+                            "stealth_scrape_denied",
+                            target=args.get("url", ""),
+                            details={"status": e.status_code, "reason": e.detail},
+                        )
+                    raise
                 target_url = args.get("url", "")
                 await log_agent_activity(agent["name"], "stealth_scrape", target=target_url)
                 async with httpx.AsyncClient(timeout=30.0) as client:
@@ -494,6 +605,12 @@ def create_gateway_app() -> FastAPI:
                 }
 
             else:
+                await _audit_denied(
+                    str(agent.get("name", "unknown")),
+                    "unknown_tool",
+                    target=str(name) if name else method,
+                    details={"code": -32601, "tool": name},
+                )
                 return {
                     "jsonrpc": "2.0",
                     "id": rpc_id,
@@ -512,11 +629,21 @@ def create_gateway_app() -> FastAPI:
     ):
         """REST search endpoint for direct agent querying."""
         cookie_val = swarm_session or request.cookies.get("swarm_session")
-        agent = await verify_agent_token(
-            auth_header=authorization,
-            cookie_token=cookie_val,
-            required_scope="search",
-        )
+        try:
+            agent = await verify_agent_token(
+                auth_header=authorization,
+                cookie_token=cookie_val,
+                required_scope="search",
+            )
+        except HTTPException as e:
+            if e.status_code in (401, 403, 429):
+                await _audit_denied(
+                    None,
+                    "auth_denied",
+                    target=req.query,
+                    details={"status": e.status_code, "endpoint": "/api/search"},
+                )
+            raise
         await log_agent_activity(
             agent["name"], "web_search", target=req.query, details={"limit": req.limit}
         )
@@ -532,11 +659,21 @@ def create_gateway_app() -> FastAPI:
     ):
         """REST page fetch endpoint for direct agent scraping."""
         cookie_val = swarm_session or request.cookies.get("swarm_session")
-        agent = await verify_agent_token(
-            auth_header=authorization,
-            cookie_token=cookie_val,
-            required_scope="scrape",
-        )
+        try:
+            agent = await verify_agent_token(
+                auth_header=authorization,
+                cookie_token=cookie_val,
+                required_scope="scrape",
+            )
+        except HTTPException as e:
+            if e.status_code in (401, 403, 429):
+                await _audit_denied(
+                    None,
+                    "auth_denied",
+                    target=req.url,
+                    details={"status": e.status_code, "endpoint": "/api/fetch"},
+                )
+            raise
         await log_agent_activity(agent["name"], "fetch_page", target=req.url)
         result = await fetch_page(url=req.url)
         return {"url": req.url, "result": result}
