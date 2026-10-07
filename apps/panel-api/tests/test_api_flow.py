@@ -17,8 +17,10 @@ from swarmd.server import SwarmdServer
 
 
 @pytest.fixture
-async def client_and_ctx(tmp_path: Path):
+async def client_and_ctx(tmp_path: Path, monkeypatch):
     SESSIONS.clear()
+    # Phase 03 retry2 QA-B P0-5: configured host so issuance succeeds without ack.
+    monkeypatch.setenv("SWARM_PUBLIC_MCP_URL", "https://test.local/mcp")
     repo_root = Path(__file__).resolve().parents[3]
     db_file = tmp_path / "panel.db"
     key_file = tmp_path / "master.key"

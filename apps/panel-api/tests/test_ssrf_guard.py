@@ -120,3 +120,44 @@ def test_is_expiry_passed_timezone_aware_fail_closed():
     assert is_expiry_passed("2000-01-01T00:00:00") is True
     # unparseable fails closed
     assert is_expiry_passed("not-a-date") is True
+
+
+def test_session_expiry_fail_closed_null_empty():
+    """Retry2 P0-1: sessions NULL/''/whitespace fail closed; valid future passes."""
+    from panel_api.ssrf_guard import is_session_expired_fail_closed
+
+    assert is_session_expired_fail_closed(None) is True
+    assert is_session_expired_fail_closed("") is True
+    assert is_session_expired_fail_closed("   ") is True
+    assert is_session_expired_fail_closed("2000-01-01T00:00:00") is True
+    assert is_session_expired_fail_closed("2000-01-01T00:00:00+00:00") is True
+    assert is_session_expired_fail_closed("not-a-date") is True
+    assert is_session_expired_fail_closed("2099-01-01T00:00:00+00:00") is False
+
+
+def test_audit_scrubs_bearer_and_token_query_preserves_forensics():
+    """Retry2 P0-2: swarm_sec_* in query redacted; ?token= in prose redacted; normal kept."""
+    from panel_api.ssrf_guard import audit_target_for_action, sanitize_details
+
+    leaked = audit_target_for_action("web_search", "lookup swarm_sec_deadbeef123 for x")
+    assert "swarm_sec_deadbeef123" not in leaked
+    assert "***redacted***" in leaked
+    assert "for x" in leaked
+    prose = audit_target_for_action(
+        "web_search", "see https://example.com/p?token=SECRET123&x=1 for details"
+    )
+    assert "SECRET123" not in prose
+    assert "?token=" not in prose
+    assert "example.com" in prose
+    assert "for details" in prose
+    # normal query preserved verbatim
+    assert audit_target_for_action("web_search", "forensic query xyz123") == "forensic query xyz123"
+    # sanitize_details covers query/url keys + nested values
+    d = sanitize_details({"query": "hi swarm_sec_abc123 bye", "limit": 5})
+    assert "swarm_sec_abc123" not in d["query"]
+    assert d["limit"] == 5
+    d = sanitize_details({"url": "https://example.com/p?token=abc123"})
+    assert "abc123" not in str(d["url"])
+    assert "example.com" in str(d["url"])
+    d = sanitize_details({"q": "normal forensic text"})
+    assert d["q"] == "normal forensic text"

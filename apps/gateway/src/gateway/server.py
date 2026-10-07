@@ -25,7 +25,7 @@ from panel_api.audit import AuditLogger
 from panel_api.ssrf_guard import (
     audit_target_for_action,
     deny_reason_for_url,
-    is_expiry_passed,
+    is_session_expired_fail_closed,
     sanitize_details,
 )
 from pydantic import BaseModel
@@ -84,6 +84,49 @@ def _prune_rate_buckets(window_start: float) -> None:
 def _reset_rate_limits() -> None:
     """Test hook: clears all sliding-window buckets (used between test cases)."""
     _RATE_BUCKETS.clear()
+    _DENIED_AUDIT_LAST.clear()
+
+
+# Phase 03 retry2 QA-B P0-3: denied-row flood guard. Every 401/403/429/
+# unknown-tool previously wrote an unbounded audit row (25 bad -> +25 rows,
+# 429s keep appending during a flood). Policy: sample denied audits per
+# (agent, action, status) with a cooldown window. First denied per key logs
+# immediately (forensics preserved); repeats within the window are dropped
+# (counter in memory only, no disk growth). Legitimate distinct denials
+# (different action/status/agent) still log. Documented in
+# docs/opencode-integration.md §5. Cooldown is deliberately short so a
+# follow-up forensic probe after the window still leaves a trace.
+_DENIED_AUDIT_COOLDOWN_S = 10.0
+_DENIED_AUDIT_LAST: dict[str, float] = {}
+_MAX_DENIED_AUDIT_KEYS = 5000
+
+
+def _denied_audit_key(agent_name: str | None, action: str, details: dict | None) -> str:
+    status_code = (details or {}).get("status", (details or {}).get("code", "?"))
+    return f"{agent_name or 'unknown'}:{action}:{status_code}"
+
+
+def _should_audit_denied(agent_name: str | None, action: str, details: dict | None) -> bool:
+    """Returns True when this denied call should write an audit row."""
+    now = time.monotonic()
+    key = _denied_audit_key(agent_name, action, details)
+    last = _DENIED_AUDIT_LAST.get(key, 0.0)
+    if now - last < _DENIED_AUDIT_COOLDOWN_S:
+        return False
+    _DENIED_AUDIT_LAST[key] = now
+    if len(_DENIED_AUDIT_LAST) > _MAX_DENIED_AUDIT_KEYS:
+        cutoff = now - _DENIED_AUDIT_COOLDOWN_S
+        for k, ts in list(_DENIED_AUDIT_LAST.items()):
+            if ts < cutoff:
+                del _DENIED_AUDIT_LAST[k]
+        while len(_DENIED_AUDIT_LAST) > _MAX_DENIED_AUDIT_KEYS:
+            _DENIED_AUDIT_LAST.pop(next(iter(_DENIED_AUDIT_LAST)))
+    return True
+
+
+def _reset_denied_audit() -> None:
+    """Test hook: clears the denied-audit cooldown map."""
+    _DENIED_AUDIT_LAST.clear()
 
 
 async def log_agent_activity(
@@ -124,11 +167,60 @@ async def _audit_denied(
     target: str | None = None,
     details: dict[str, Any] | None = None,
 ) -> None:
-    """Best-effort denied-call audit row; never raises (must not mask the error)."""
+    """Best-effort denied-call audit row; never raises (must not mask the error).
+
+    Phase 03 retry2 QA-B P0-3: cooldown-sampled so a credential-stuffing or
+    429 flood cannot fill the disk (first per 10s per agent/action/status
+    writes; repeats in-window are dropped with a debug log).
+    """
     try:
+        if not _should_audit_denied(agent_name, action, details):
+            log.debug(
+                "Denied-call audit sampled out for %s/%s (flood guard)",
+                agent_name or "unknown",
+                action,
+            )
+            return
         await log_agent_activity(agent_name or "unknown", action, target=target, details=details)
     except Exception as e:
         log.warning("Denied-call audit failed for %s: %s", action, e)
+
+
+async def _ensure_gateway_session_schema(db: aiosqlite.Connection) -> None:
+    """Best-effort legacy migration for old DBs missing sessions.expires_at.
+
+    Phase 03 retry2 QA-B P0-1: old DBs must never 500. Missing column is
+    added, legacy NULL/'' rows are swept to expired (fail-closed 401).
+    Never raises.
+    """
+    try:
+        async with db.execute("PRAGMA table_info(sessions)") as cur:
+            cols = [r["name"] for r in await cur.fetchall()]
+        if cols and "expires_at" not in cols:
+            await db.execute("ALTER TABLE sessions ADD COLUMN expires_at TIMESTAMP")
+            await db.commit()
+            async with db.execute("PRAGMA table_info(sessions)") as cur:
+                cols = [r["name"] for r in await cur.fetchall()]
+        if "expires_at" in cols:
+            await db.execute(
+                "UPDATE sessions SET expires_at = '2000-01-01T00:00:00+00:00'"
+                " WHERE expires_at IS NULL OR TRIM(expires_at) = ''"
+            )
+            await db.commit()
+    except Exception as e:
+        log.debug("Gateway session schema migration skipped: %s", e)
+
+
+async def _ensure_gateway_agent_key_schema(db: aiosqlite.Connection) -> None:
+    """Best-effort legacy migration for old DBs missing agent_keys.expires_at."""
+    try:
+        async with db.execute("PRAGMA table_info(agent_keys)") as cur:
+            cols = [r["name"] for r in await cur.fetchall()]
+        if cols and "expires_at" not in cols:
+            await db.execute("ALTER TABLE agent_keys ADD COLUMN expires_at TIMESTAMP")
+            await db.commit()
+    except Exception as e:
+        log.debug("Gateway agent-key schema migration skipped: %s", e)
 
 
 async def verify_agent_token(
@@ -162,55 +254,88 @@ async def verify_agent_token(
 
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT id, name, scopes, rate_limit_rpm, expires_at "
-                "FROM agent_keys WHERE key_hash = ?",
-                (token_hash,),
-            ) as cur:
-                row = await cur.fetchone()
-                if not row:
+            row = None
+            try:
+                async with db.execute(
+                    "SELECT id, name, scopes, rate_limit_rpm, expires_at "
+                    "FROM agent_keys WHERE key_hash = ?",
+                    (token_hash,),
+                ) as cur:
+                    row = await cur.fetchone()
+            except Exception as e:
+                # Phase 03 retry2 QA-B P0-1: old DBs missing expires_at must
+                # never 500 — migrate once, retry once, else fail-closed 401.
+                if "no such column" in str(e).lower():
+                    await _ensure_gateway_agent_key_schema(db)
+                    try:
+                        async with db.execute(
+                            "SELECT id, name, scopes, rate_limit_rpm, expires_at "
+                            "FROM agent_keys WHERE key_hash = ?",
+                            (token_hash,),
+                        ) as cur:
+                            row = await cur.fetchone()
+                    except Exception:
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid or revoked agent API key",
+                        ) from None
+                else:
+                    log.warning("Agent-key lookup failed: %s", e)
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="Invalid or revoked agent API key",
-                    )
+                    ) from None
+            if not row:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or revoked agent API key",
+                )
 
-                # Phase 03 AC5: expired keys fail closed with 401 (same as revoked).
+            # Phase 03 AC5 + retry2 QA-B P0-1: expired keys fail closed with
+            # 401 (same as revoked). NULL (acked never-expire) stays valid;
+            # ''/whitespace/unparseable fail closed rather than granting access.
+            try:
+                expires_at = row["expires_at"]
+            except (KeyError, IndexError):
+                expires_at = None
+            if expires_at is not None:
+                exp_text = str(expires_at).strip()
+                if not exp_text:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Agent API key expiry invalid",
+                    )
                 try:
-                    expires_at = row["expires_at"]
-                except (KeyError, IndexError):
-                    expires_at = None
-                if expires_at:
-                    try:
-                        exp = datetime.fromisoformat(str(expires_at))
-                        if exp.tzinfo is None:
-                            exp = exp.replace(tzinfo=UTC)
-                        if exp <= datetime.now(UTC):
-                            raise HTTPException(
-                                status_code=status.HTTP_401_UNAUTHORIZED,
-                                detail="Agent API key expired",
-                            )
-                    except HTTPException:
-                        raise
-                    except Exception:
-                        # Unparseable expiry fails closed rather than granting access.
+                    exp = datetime.fromisoformat(exp_text)
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=UTC)
+                    if exp <= datetime.now(UTC):
                         raise HTTPException(
                             status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Agent API key expiry invalid",
-                        ) from None
-
-                scopes = json.loads(row["scopes"])
-                if required_scope not in scopes and "admin" not in scopes:
+                            detail="Agent API key expired",
+                        )
+                except HTTPException:
+                    raise
+                except Exception:
+                    # Unparseable expiry fails closed rather than granting access.
                     raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"Key lacks required scope '{required_scope}'",
-                    )
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Agent API key expiry invalid",
+                    ) from None
 
-                # Phase 03 AC5: sliding-window per-key rate limit (HTTP 429).
-                # Skipped for in-request per-tool re-verification (one HTTP call = one hit).
-                if enforce_rate_limit:
-                    _check_rate_limit(str(row["id"]), int(row["rate_limit_rpm"] or 60))
+            scopes = json.loads(row["scopes"])
+            if required_scope not in scopes and "admin" not in scopes:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Key lacks required scope '{required_scope}'",
+                )
 
-                return dict(row)
+            # Phase 03 AC5: sliding-window per-key rate limit (HTTP 429).
+            # Skipped for in-request per-tool re-verification (one HTTP call = one hit).
+            if enforce_rate_limit:
+                _check_rate_limit(str(row["id"]), int(row["rate_limit_rpm"] or 60))
+
+            return dict(row)
 
     # 2. Session Cookie Authentication (for web panel operators / admins)
     session_token = cookie_token
@@ -220,52 +345,77 @@ async def verify_agent_token(
     if session_token:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT user_id, username, role, expires_at FROM sessions WHERE token = ?",
-                (session_token,),
-            ) as cur:
-                row = await cur.fetchone()
-                if row:
-                    # Phase 03 retry1 QA-B P0-1: expired sessions fail closed
-                    # with 401 (timezone-aware; unparseable fails closed).
+            # Phase 03 retry2 QA-B P0-1: migrate-then-read so old DBs without
+            # sessions.expires_at never 500 (fail-closed 401 instead).
+            await _ensure_gateway_session_schema(db)
+            try:
+                async with db.execute(
+                    "SELECT user_id, username, role, expires_at FROM sessions WHERE token = ?",
+                    (session_token,),
+                ) as cur:
+                    row = await cur.fetchone()
+            except Exception as e:
+                if "no such column" in str(e).lower():
+                    await _ensure_gateway_session_schema(db)
                     try:
-                        sess_expires = row["expires_at"]
-                    except (KeyError, IndexError):
-                        sess_expires = None
-                    if sess_expires and is_expiry_passed(str(sess_expires)):
+                        async with db.execute(
+                            "SELECT user_id, username, role, expires_at "
+                            "FROM sessions WHERE token = ?",
+                            (session_token,),
+                        ) as cur:
+                            row = await cur.fetchone()
+                    except Exception:
                         raise HTTPException(
                             status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Session expired",
-                        )
-                    role = row["role"]
-                    if role in ("admin", "operator"):
-                        # Phase 03 retry1 QA-B P0-2: session path enforces the
-                        # same sliding-window bucket (keyed by session user)
-                        # so cookie auth cannot bypass rpm limits.
+                            detail="Authentication required (Bearer token or session cookie)",
+                        ) from None
+                else:
+                    log.warning("Session lookup failed: %s", e)
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Authentication required (Bearer token or session cookie)",
+                    ) from None
+            if row:
+                # Phase 03 retry2 QA-B P0-1: NULL/''/missing/expired sessions
+                # fail closed with 401 (never immortal).
+                try:
+                    sess_expires = row["expires_at"]
+                except (KeyError, IndexError):
+                    sess_expires = None
+                if is_session_expired_fail_closed(sess_expires):
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Session expired",
+                    )
+                role = row["role"]
+                if role in ("admin", "operator"):
+                    # Phase 03 retry1 QA-B P0-2: session path enforces the
+                    # same sliding-window bucket (keyed by session user)
+                    # so cookie auth cannot bypass rpm limits.
+                    if enforce_rate_limit:
+                        _check_rate_limit(f"session:{row['user_id']}", 600)
+                    return {
+                        "id": row["user_id"],
+                        "name": row["username"],
+                        "scopes": ["admin", "search", "scrape"],
+                        "rate_limit_rpm": 600,
+                        "role": role,
+                    }
+                elif role == "viewer":
+                    if required_scope == "search":
                         if enforce_rate_limit:
-                            _check_rate_limit(f"session:{row['user_id']}", 600)
+                            _check_rate_limit(f"session:{row['user_id']}", 60)
                         return {
                             "id": row["user_id"],
                             "name": row["username"],
-                            "scopes": ["admin", "search", "scrape"],
-                            "rate_limit_rpm": 600,
+                            "scopes": ["search"],
+                            "rate_limit_rpm": 60,
                             "role": role,
                         }
-                    elif role == "viewer":
-                        if required_scope == "search":
-                            if enforce_rate_limit:
-                                _check_rate_limit(f"session:{row['user_id']}", 60)
-                            return {
-                                "id": row["user_id"],
-                                "name": row["username"],
-                                "scopes": ["search"],
-                                "rate_limit_rpm": 60,
-                                "role": role,
-                            }
-                        raise HTTPException(
-                            status_code=status.HTTP_403_FORBIDDEN,
-                            detail="Viewer role lacks scrape permissions",
-                        )
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Viewer role lacks scrape permissions",
+                    )
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

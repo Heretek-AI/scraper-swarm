@@ -26,6 +26,15 @@
  * fetch intent — blocking all shell use would break legitimate commands.
  * Block messages are generic (tool name only, never the URL) so secret-bearing
  * query strings are never echoed into error text.
+ *
+ * Retry2 QA-B P0-4: denylist broadened to network-exfil primitives. Direct
+ * tool names python/powershell/pwsh/cmd/http_request (+socket/netcat/nc) are
+ * blocked outright; shell/python args carrying /dev/tcp, socket,
+ * invoke-webrequest, base64 pipe, or nc are blocked as exfil intent. Plain
+ * `bash ls` still passes. Residual risk (novel exfil binaries, obfuscated
+ * one-liners the substring list cannot see) is documented in
+ * docs/opencode-integration.md §4 — the gateway SSRF pre-deny + Smokescreen
+ * remain the enforcement backstop for anything the editor guard misses.
  */
 
 export interface PluginContext {
@@ -40,28 +49,77 @@ function normalizeToolName(tool: string): string {
   return (tool || "").toLowerCase().replace(/[-_\s]/g, "");
 }
 
-// Direct-fetch tool aliases (normalized: lowercase, no -/_). Any name
-// containing fetch/curl/wget is treated as a fetch tool as a fail-closed
-// catch-all for future variants.
+// Shell-like hosts whose ARGS are inspected for exfil intent (not blocked
+// outright so plain `ls` keeps working).
 const SHELL_TOOLS = new Set(["bash", "shell", "exec", "command", "terminal", "sh", "zsh"]);
 
-function isFetchTool(normalized: string): boolean {
-  if (normalized.includes("fetch")) return true;
-  if (normalized.includes("curl")) return true;
-  if (normalized.includes("wget")) return true;
+// Retry2 P0-4: direct-tool substring blocklist (normalized). Long tokens use
+// substring so versioned variants (python3, powershell.exe) still match.
+const BLOCKED_TOOL_SUBSTRINGS = [
+  "fetch",
+  "curl",
+  "wget",
+  "python",
+  "powershell",
+  "pwsh",
+  "httprequest",
+  "socket",
+  "netcat",
+];
+
+// Retry2 P0-4: exact-match blocklist for short names where substring would
+// false-positive (e.g. "nc" inside "sync", "cmd" handling kept exact).
+const BLOCKED_TOOL_EXACT = new Set(["cmd", "nc", "ncat"]);
+
+function isBlockedTool(normalized: string): boolean {
+  for (const part of BLOCKED_TOOL_SUBSTRINGS) {
+    if (normalized.includes(part)) return true;
+  }
+  if (BLOCKED_TOOL_EXACT.has(normalized)) return true;
   return false;
 }
 
+function isFetchTool(normalized: string): boolean {
+  return isBlockedTool(normalized);
+}
+
 function shellArgsLookLikeFetch(args: Record<string, any>): boolean {
+  return shellArgsLookLikeExfil(args);
+}
+
+function shellArgsLookLikeExfil(args: Record<string, any>): boolean {
   try {
     const blob = JSON.stringify(args || {}).toLowerCase();
-    return (
+    if (
       blob.includes("curl") ||
       blob.includes("wget") ||
       blob.includes("http://") ||
       blob.includes("https://") ||
-      blob.includes("webfetch")
-    );
+      blob.includes("webfetch") ||
+      blob.includes("httprequest") ||
+      blob.includes("http_request")
+    )
+      return true;
+    if (
+      blob.includes("python") ||
+      blob.includes("powershell") ||
+      blob.includes("pwsh") ||
+      blob.includes("invoke-webrequest") ||
+      blob.includes("invoke-restmethod")
+    )
+      return true;
+    if (blob.includes("/dev/tcp") || blob.includes("socket") || blob.includes("base64"))
+      return true;
+    if (blob.includes("netcat") || blob.includes("ncat")) return true;
+    // "nc" needs word boundaries: "nc host 4444" blocks, "sync files" passes.
+    if (/(?:^|[^a-z])nc(?:[^a-z]|$)/.test(blob)) return true;
+    // bare "cmd" as a command word (key "command" itself must not trigger).
+    if (/(?:^|[^a-z])cmd(?:\.exe)?(?:[^a-z]|$)/.test(blob)) {
+      // Avoid matching the JSON key "command": require cmd NOT followed by "mand".
+      // The regex above already excludes "command" (cmd followed by "m").
+      return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -79,13 +137,15 @@ export const ScraperSwarmPlugin = async (ctx: PluginContext) => {
     "tool.execute.before": async (input: { tool: string }, output: { args: Record<string, any> }) => {
       const rawTool = input.tool || "";
       const normalized = normalizeToolName(rawTool);
-      // 1. Direct fetch-tool aliases, case-insensitive (WebFetch/WEBFETCH/web_fetch/...).
-      if (isFetchTool(normalized)) {
+      // 1. Direct exfil-tool names, case-insensitive (WebFetch/python3/
+      // powershell/pwsh/cmd/nc/http_request/socket/...).
+      if (isBlockedTool(normalized)) {
         throw new Error(blockedMessage(rawTool));
       }
-      // 2. Shell bypass: bash/shell/exec with fetch-like args (curl/wget/URL).
+      // 2. Shell bypass: bash/shell/exec (and python-ish hosts invoked via
+      // shell) with exfil-like args (/dev/tcp, socket, base64|sh, nc, ...).
       if (SHELL_TOOLS.has(normalized) || SHELL_TOOLS.has(rawTool.toLowerCase())) {
-        if (shellArgsLookLikeFetch(output.args)) {
+        if (shellArgsLookLikeExfil(output.args)) {
           throw new Error(blockedMessage(rawTool));
         }
       }

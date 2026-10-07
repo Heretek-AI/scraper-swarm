@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import secrets
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -64,6 +65,10 @@ class CreateAgentKeyRequest(BaseModel):
     # for an explicitly-acknowledged never-expiring key.
     expires_in_hours: int | None = Field(default=DEFAULT_KEY_TTL_HOURS, ge=1, le=8760)
     allow_never_expire: bool = Field(default=False)
+    # Phase 03 retry2 QA-B P0-5: dead-host snippets ship a live bearer next to
+    # a REPLACE-ME host. Issuance with a placeholder host now requires explicit
+    # acknowledgement (mirrors the TTL ack) so the warning cannot be ignored.
+    allow_placeholder_host: bool = Field(default=False)
 
 
 class CreateAgentKeyResponse(BaseModel):
@@ -83,6 +88,16 @@ async def create_agent_key(
     db: Database = Depends(get_db),
     user: SessionInfo = Depends(require_role("admin", "operator")),
 ):
+    # Phase 03 retry2 QA-B P0-5: trim names; whitespace-only rejected 422 so
+    # squatting on blank/ambiguous names cannot mint confusing keys.
+    clean_name = req.name.strip()
+    if not clean_name:
+        raise HTTPException(
+            status_code=422, detail="Agent key name must not be blank or whitespace-only"
+        )
+    if len(clean_name) > 64:
+        raise HTTPException(status_code=422, detail="Agent key name too long (max 64)")
+
     # Phase 03 retry1 QA-B P0-5: dedupe scopes (preserve order) before validation.
     deduped_scopes: list[str] = list(dict.fromkeys(req.scopes))
 
@@ -96,14 +111,16 @@ async def create_agent_key(
     if not deduped_scopes:
         raise HTTPException(status_code=422, detail="At least one scope is required")
 
-    # Phase 03 retry1 QA-B P0-5: duplicate key names rejected with 409 so
-    # operators cannot mint ambiguous keys.
+    # Phase 03 retry2 QA-B P0-5: case-insensitive dup check (NOCASE) plus a
+    # UNIQUE NOCASE constraint as the race backstop (see db.py migration).
+    # Check-then-insert alone races under concurrency; the constraint turns
+    # the loser into IntegrityError -> 409 below.
     async with db.conn.execute(
-        "SELECT id FROM agent_keys WHERE name = ?", (req.name,)
+        "SELECT id FROM agent_keys WHERE name = ? COLLATE NOCASE", (clean_name,)
     ) as cur:
         if await cur.fetchone():
             raise HTTPException(
-                status_code=409, detail=f"Agent key name '{req.name}' already exists"
+                status_code=409, detail=f"Agent key name '{clean_name}' already exists"
             )
 
     # Phase 03 retry1 QA-B P0-5: infinite keys require explicit acknowledgement.
@@ -126,14 +143,44 @@ async def create_agent_key(
     if req.expires_in_hours is not None:
         expires_at = (datetime.now(UTC) + timedelta(hours=req.expires_in_hours)).isoformat()
 
-    await db.conn.execute(
-        """
-        INSERT INTO agent_keys (id, name, key_hash, key_prefix, scopes, rate_limit_rpm, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (key_id, req.name, key_hash, key_prefix, scopes_json, req.rate_limit_rpm, expires_at),
-    )
-    await db.conn.commit()
+    # Phase 03 retry2 QA-B P0-5: dead-host ack gate (mirrors TTL ack). A
+    # REPLACE-ME placeholder beside a live bearer must be explicitly
+    # acknowledged; otherwise issuance is blocked 422 before any key ships.
+    # Resolved here (before INSERT) so denied requests mint no rows/keys.
+    public_url, is_placeholder = _resolve_public_mcp_url()
+    is_cleartext_http = public_url.lower().startswith("http://")
+    if is_placeholder and not req.allow_placeholder_host:
+        raise HTTPException(
+            status_code=422,
+            detail="Snippet host is a REPLACE-ME placeholder: set SWARM_PUBLIC_MCP_URL "
+            "to the real gateway origin, or pass allow_placeholder_host=true to "
+            "acknowledge sharing a live key with a dead host",
+        )
+
+    try:
+        await db.conn.execute(
+            """
+            INSERT INTO agent_keys
+                (id, name, key_hash, key_prefix, scopes, rate_limit_rpm, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                key_id,
+                clean_name,
+                key_hash,
+                key_prefix,
+                scopes_json,
+                req.rate_limit_rpm,
+                expires_at,
+            ),
+        )
+        await db.conn.commit()
+    except sqlite3.IntegrityError:
+        # UNIQUE NOCASE loser of a concurrent same-name race (or a
+        # case-variant squat): fail 409, never 500, never a second live key.
+        raise HTTPException(
+            status_code=409, detail=f"Agent key name '{clean_name}' already exists"
+        ) from None
 
     logger = AuditLogger(db.conn)
     await logger.log(
@@ -141,11 +188,12 @@ async def create_agent_key(
         action="create_agent_key",
         target=key_id,
         # Phase 03: never log raw_key/key_hash — prefix + scopes only (no extra leakage).
-        details={"name": req.name, "scopes": deduped_scopes, "key_prefix": key_prefix},
+        details={"name": clean_name, "scopes": deduped_scopes, "key_prefix": key_prefix},
     )
 
-    # Phase 03 retry1 QA-B P0-5: resolve host at request time; flag placeholders.
-    public_url, is_placeholder = _resolve_public_mcp_url()
+    # Phase 03 retry2 QA-B P0-5: snippet warnings. Placeholder (acked above)
+    # keeps its REPLACE-ME warning; plain-http hosts warn bearer-over-
+    # cleartext. Both warnings preserve the live key flow (200) once acked.
     opencode_snippet: dict = {
         "$schema": "https://opencode.ai/config.json",
         "plugin": ["@scraper-swarm/opencode-plugin"],
@@ -162,12 +210,19 @@ async def create_agent_key(
         opencode_snippet["warning"] = (
             "SWARM_PUBLIC_MCP_URL is not configured: snippet host is a "
             "REPLACE-ME placeholder. Set SWARM_PUBLIC_MCP_URL to the real "
-            "gateway origin before sharing this snippet."
+            "gateway origin before sharing this snippet. "
+            "(Acknowledged via allow_placeholder_host=true; live bearer ships "
+            "with a dead host — verify before distributing.)"
+        )
+    elif is_cleartext_http:
+        opencode_snippet["warning"] = (
+            "Snippet URL uses plain http://: the bearer travels over cleartext "
+            "and can be intercepted. Prefer https:// for the gateway origin."
         )
 
     return CreateAgentKeyResponse(
         id=key_id,
-        name=req.name,
+        name=clean_name,
         raw_key=raw_key,
         key_prefix=key_prefix,
         scopes=deduped_scopes,

@@ -91,10 +91,28 @@ Valkey; the gateway helper (`_check_rate_limit`) is the seam.
 `packages/opencode-plugin` (`tool.execute.before`) **blocks** raw
 `webfetch`/`fetch` with an error naming the correct swarm MCP tool — the
 OpenCode v2 hook surface cannot re-route a call, so block-plus-message is the
-enforced pattern (proven by `npm test` / vitest in that package). The
-Workbench console is the equivalent interactive path: it calls `/mcp`
-directly, so every execution carries Bearer auth, per-tool scope checks, SSRF
-pre-deny, and sanitized hash-chained audit rows (`agent:<name>`).
+enforced pattern (proven by `npm test` / vitest in that package). Retry2
+broadens the denylist to network-exfil primitives: direct tool names
+`python`/`python3`/`powershell`/`pwsh`/`cmd`/`http_request`/`socket`/`netcat`/
+`nc` are blocked outright, and shell args carrying `/dev/tcp`, `socket`,
+`invoke-webrequest`, `base64` pipes, or `nc` are blocked as exfil intent.
+Plain `bash ls` (and `sync files`) still passes. Block messages stay generic
+(tool name only, never the URL/args) so secret-bearing queries are never
+echoed. Residual risk: a novel exfil binary or heavily obfuscated one-liner
+the substring list cannot see still passes the editor guard — the gateway
+SSRF pre-deny (`deny_reason_for_url`) + Smokescreen per-connection egress
+remain the enforcement backstop. The Workbench console is the equivalent
+interactive path: it calls `/mcp` directly, so every execution carries Bearer
+auth, per-tool scope checks, SSRF pre-deny, and sanitized hash-chained audit
+rows (`agent:<name>`).
+
+Key issuance hardening: names are trimmed (whitespace-only `422`), unique
+case-insensitively (`UNIQUE COLLATE NOCASE` + `IntegrityError → 409`, so
+concurrent same-name races yield exactly one `200`), default TTL `720h`,
+never-expire requires `allow_never_expire=true`, and a `REPLACE-ME`
+placeholder host blocks `422` unless `allow_placeholder_host=true` is passed
+(acked requests still carry the conspicuous warning). Plain-`http://`
+snippet hosts warn bearer-over-cleartext.
 
 ## 5. Audit proof
 
@@ -103,3 +121,14 @@ pre-deny, and sanitized hash-chained audit rows (`agent:<name>`).
 and no bearer material. Scope/revoke/expiry/rate tests live in
 `apps/gateway/tests/test_gateway.py`; issuance tests in
 `apps/panel-api/tests/test_agent_keys.py`.
+
+Denied-row flood policy (retry2 P0-3): denied calls (`401`/`403`/`429`/
+`unknown_tool`) are cooldown-sampled per `(agent, action, status)` — first
+per `10 s` window writes, repeats in-window are dropped (memory counter only,
+no disk growth). Distinct denials still log; `25` identical bad-auth attempts
+yield `1` row, not `25`. Session expiry is fail-closed (`NULL`/`''`/
+whitespace/missing/unparseable/naive-past → `401`); legacy DBs missing
+`sessions.expires_at` are migrated (`ADD COLUMN` + sweep `NULL`/`''` to
+expired) so they never `500`. Audit scrub (`scrub_secrets_from_text`) redacts
+`swarm_sec_*`, `Bearer` tokens, `token=`/`secret=` KV, and embedded-URL
+query/fragments while preserving non-secret query forensics.

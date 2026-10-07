@@ -20,7 +20,16 @@ class AuditLogger:
         target: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> str:
-        details_json = json.dumps(details or {}, sort_keys=True)
+        # Phase 03 retry2 QA-B P0-2 defense-in-depth: scrub every target and
+        # detail value so a caller that forgets sanitize_details can never
+        # persist swarm_sec_*/Bearer/?token= secrets. Non-secret forensics
+        # survive verbatim.
+        from panel_api.ssrf_guard import sanitize_details, scrub_secrets_from_text
+
+        if target is not None:
+            target = scrub_secrets_from_text(target)
+        details = sanitize_details(details or {})
+        details_json = json.dumps(details, sort_keys=True)
 
         async with self.db.execute(
             "SELECT entry_hash FROM audit_log ORDER BY id DESC LIMIT 1"

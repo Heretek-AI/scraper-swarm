@@ -26,8 +26,11 @@ from swarmd.server import SwarmdServer
 
 
 @pytest.fixture
-async def authed_client(tmp_path: Path):
+async def authed_client(tmp_path: Path, monkeypatch):
     SESSIONS.clear()
+    # Phase 03 retry2 QA-B P0-5: default tests use a configured host so the
+    # dead-host ack gate does not interfere; the placeholder test unsets it.
+    monkeypatch.setenv("SWARM_PUBLIC_MCP_URL", "https://test.local/mcp")
     repo_root = Path(__file__).resolve().parents[3]
     db_file = tmp_path / "panel.db"
     key_file = tmp_path / "master.key"
@@ -200,10 +203,18 @@ async def test_create_key_infinite_requires_ack_and_defaults_ttl(authed_client):
 
 @pytest.mark.asyncio
 async def test_snippet_placeholder_warns_when_host_unconfigured(authed_client, monkeypatch):
-    """Retry1 P0-5: placeholder host conspicuous + warning, bound at request time."""
+    """Retry2 P0-5: dead-host placeholder blocks without ack, warns once acked."""
     client, _ = authed_client
     monkeypatch.delenv("SWARM_PUBLIC_MCP_URL", raising=False)
+    # Without ack: blocked 422 before any live key ships.
     r = await client.post("/agents/keys", json={"name": "snippet-place", "scopes": ["search"]})
+    assert r.status_code == 422
+    assert "REPLACE-ME" in r.text or "placeholder" in r.text.lower()
+    # With explicit ack: 200 + conspicuous REPLACE-ME + warning (request-time bind).
+    r = await client.post(
+        "/agents/keys",
+        json={"name": "snippet-place", "scopes": ["search"], "allow_placeholder_host": True},
+    )
     assert r.status_code == 200
     snippet = r.json()["opencode_snippet"]
     assert snippet["mcp"]["scraper-swarm"]["url"].endswith("/mcp")
@@ -213,6 +224,43 @@ async def test_snippet_placeholder_warns_when_host_unconfigured(authed_client, m
     r = await client.post("/agents/keys", json={"name": "snippet-real", "scopes": ["search"]})
     assert r.json()["opencode_snippet"]["mcp"]["scraper-swarm"]["url"] == "https://myhost.local/mcp"
     assert "warning" not in r.json()["opencode_snippet"]
+    # http:// cleartext host warns bearer-over-cleartext (still 200).
+    monkeypatch.setenv("SWARM_PUBLIC_MCP_URL", "http://myhost.local/mcp")
+    r = await client.post("/agents/keys", json={"name": "snippet-http", "scopes": ["search"]})
+    assert r.status_code == 200
+    assert "warning" in r.json()["opencode_snippet"]
+    assert "cleartext" in r.json()["opencode_snippet"]["warning"].lower()
+
+
+@pytest.mark.asyncio
+async def test_create_key_rejects_whitespace_name_and_case_dup_409(authed_client):
+    """Retry2 P0-5: whitespace-only 422; case-variant dup 409 (NOCASE)."""
+    client, _ = authed_client
+    r = await client.post("/agents/keys", json={"name": "   ", "scopes": ["search"]})
+    assert r.status_code == 422
+    r = await client.post("/agents/keys", json={"name": "CaseKey", "scopes": ["search"]})
+    assert r.status_code == 200
+    r = await client.post("/agents/keys", json={"name": "casekey", "scopes": ["search"]})
+    assert r.status_code == 409
+    r = await client.post("/agents/keys", json={"name": "  CaseKey  ", "scopes": ["search"]})
+    assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_create_key_concurrent_same_name_single_winner(authed_client):
+    """Retry2 P0-5: concurrent same-name inserts -> exactly one 200, rest 409 (no hang)."""
+    import asyncio
+
+    client, _ = authed_client
+    results = await asyncio.gather(
+        *(
+            client.post("/agents/keys", json={"name": "race-key-1", "scopes": ["search"]})
+            for _ in range(3)
+        )
+    )
+    codes = sorted(r.status_code for r in results)
+    assert codes.count(200) == 1
+    assert codes.count(409) == 2
 
 
 @pytest.mark.asyncio
@@ -235,3 +283,41 @@ async def test_panel_session_expiry_401(authed_client):
     client.cookies.set("swarm_session", "sess-panel-expired")
     r = await client.get("/auth/me")
     assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_panel_session_null_empty_naive_fail_closed(authed_client):
+    """Retry2 P0-1: NULL/''/whitespace/naive-past sessions 401; valid future 200."""
+    from panel_api.routers.auth import SESSIONS
+
+    client, db = authed_client
+    await db.conn.execute(
+        "INSERT INTO users (id, username, role) VALUES ('u-null-1', 'null_user', 'viewer')"
+    )
+    cases = [
+        ("sess-null", None),
+        ("sess-empty", ""),
+        ("sess-ws", "   "),
+        ("sess-naive-past", "2000-01-01T00:00:00"),
+        ("sess-unparseable", "not-a-date"),
+    ]
+    for token, exp in cases:
+        await db.conn.execute(
+            "INSERT OR REPLACE INTO sessions (token, user_id, username, role, expires_at)"
+            " VALUES (?, 'u-null-1', 'null_user', 'viewer', ?)",
+            (token, exp),
+        )
+    await db.conn.execute(
+        "INSERT OR REPLACE INTO sessions (token, user_id, username, role, expires_at)"
+        " VALUES ('sess-valid', 'u-null-1', 'null_user', 'viewer', '2099-01-01T00:00:00+00:00')",
+    )
+    await db.conn.commit()
+    for token, _ in cases:
+        SESSIONS.pop(token, None)
+        client.cookies.set("swarm_session", token)
+        r = await client.get("/auth/me")
+        assert r.status_code == 401, token
+    SESSIONS.pop("sess-valid", None)
+    client.cookies.set("swarm_session", "sess-valid")
+    r = await client.get("/auth/me")
+    assert r.status_code == 200

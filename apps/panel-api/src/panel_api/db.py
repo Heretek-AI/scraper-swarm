@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS webauthn_credentials (
 
 CREATE TABLE IF NOT EXISTS agent_keys (
     id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
     key_hash TEXT UNIQUE NOT NULL, -- SHA-256 hash of the bearer token
     key_prefix TEXT NOT NULL, -- First 14 chars for user display (raw_key[:14] + "...")
     scopes TEXT NOT NULL,     -- JSON array of scopes, e.g. ["search", "scrape"]
@@ -84,9 +84,49 @@ class Database:
         await self._conn.execute("PRAGMA foreign_keys = ON;")
         await self._conn.executescript(SCHEMA)
         await self._conn.commit()
+        # Phase 03 retry2 QA-B P0-1/P0-5 migrations for legacy DBs (no 500):
+        # - sessions.expires_at column may be missing -> ADD COLUMN
+        # - legacy NULL/''/whitespace sessions swept to expired (fail-closed)
+        # - agent_keys.name UNIQUE NOCASE index for dup-name race + squatting
+        await self._migrate_legacy_schema()
 
         if self.db_path.exists():
             os.chmod(self.db_path, 0o600)
+
+    async def _migrate_legacy_schema(self) -> None:
+        """Best-effort legacy migrations; never raises (connect must succeed)."""
+        import logging
+
+        _log = logging.getLogger(__name__)
+        if self._conn is None:
+            return
+        try:
+            async with self._conn.execute("PRAGMA table_info(sessions)") as cur:
+                sess_cols = [r["name"] for r in await cur.fetchall()]
+            if sess_cols and "expires_at" not in sess_cols:
+                await self._conn.execute("ALTER TABLE sessions ADD COLUMN expires_at TIMESTAMP")
+                await self._conn.commit()
+                async with self._conn.execute("PRAGMA table_info(sessions)") as cur:
+                    sess_cols = [r["name"] for r in await cur.fetchall()]
+            if "expires_at" in sess_cols:
+                await self._conn.execute(
+                    "UPDATE sessions SET expires_at = '2000-01-01T00:00:00+00:00'"
+                    " WHERE expires_at IS NULL OR TRIM(expires_at) = ''"
+                )
+                await self._conn.commit()
+        except Exception as e:
+            _log.debug("Legacy session migration skipped: %s", e)
+        try:
+            await self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_keys_name_nocase"
+                " ON agent_keys(name COLLATE NOCASE)"
+            )
+            await self._conn.commit()
+        except Exception as e:
+            # Pre-existing case-variant duplicates: leave rows untouched; the
+            # per-request NOCASE SELECT + IntegrityError path still 409s new
+            # conflicts without breaking connect on old DBs.
+            _log.debug("Agent-key NOCASE index skipped: %s", e)
 
     async def close(self) -> None:
         if self._conn:

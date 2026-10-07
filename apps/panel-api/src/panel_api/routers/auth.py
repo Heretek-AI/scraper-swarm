@@ -11,7 +11,7 @@ import pyotp
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from panel_api.audit import AuditLogger
 from panel_api.db import Database
-from panel_api.ssrf_guard import is_expiry_passed
+from panel_api.ssrf_guard import is_session_expired_fail_closed
 from panel_api.vault import Vault
 from pydantic import BaseModel, Field
 
@@ -81,8 +81,9 @@ async def get_current_user(
         )
     if swarm_session in SESSIONS:
         data = SESSIONS[swarm_session]
-        # Phase 03 retry1 QA-B P0-1: in-memory sessions honor expires_at.
-        if is_expiry_passed(data.get("expires_at")):
+        # Phase 03 retry2 QA-B P0-1: in-memory sessions fail closed on
+        # NULL/empty/missing expires_at (never immortal).
+        if is_session_expired_fail_closed(data.get("expires_at")):
             del SESSIONS[swarm_session]
             from panel_api.main import app_state as _state
 
@@ -109,6 +110,26 @@ async def get_current_user(
 
     if app_state and app_state.db and app_state.db.conn:
         try:
+            # Phase 03 retry2 QA-B P0-1: migrate-then-read so old DBs without
+            # sessions.expires_at never 500 (fail-closed 401 instead).
+            try:
+                async with app_state.db.conn.execute("PRAGMA table_info(sessions)") as _pcur:
+                    _cols = [r["name"] for r in await _pcur.fetchall()]
+                if _cols and "expires_at" not in _cols:
+                    await app_state.db.conn.execute(
+                        "ALTER TABLE sessions ADD COLUMN expires_at TIMESTAMP"
+                    )
+                    await app_state.db.conn.commit()
+                    try:
+                        await app_state.db.conn.execute(
+                            "UPDATE sessions SET expires_at = '2000-01-01T00:00:00+00:00'"
+                            " WHERE expires_at IS NULL OR TRIM(expires_at) = ''"
+                        )
+                        await app_state.db.conn.commit()
+                    except Exception as e:
+                        logger.debug("Legacy session backfill failed: %s", e)
+            except Exception as e:
+                logger.debug("Session schema migrate check failed: %s", e)
             async with app_state.db.conn.execute(
                 "SELECT user_id, username, role, expires_at FROM sessions WHERE token = ?",
                 (swarm_session,),
@@ -119,9 +140,9 @@ async def get_current_user(
                         sess_expires = row["expires_at"]
                     except (KeyError, IndexError):
                         sess_expires = None
-                    # Phase 03 retry1 QA-B P0-1: expired DB sessions fail
-                    # closed with 401 (timezone-aware; unparseable = expired).
-                    if sess_expires and is_expiry_passed(str(sess_expires)):
+                    # Phase 03 retry2 QA-B P0-1: NULL/''/missing/expired DB
+                    # sessions fail closed with 401 (never immortal).
+                    if is_session_expired_fail_closed(sess_expires):
                         try:
                             await app_state.db.conn.execute(
                                 "DELETE FROM sessions WHERE token = ?", (swarm_session,)
@@ -137,7 +158,7 @@ async def get_current_user(
                         "user_id": row["user_id"],
                         "username": row["username"],
                         "role": row["role"],
-                        "expires_at": row["expires_at"] if "expires_at" in row else None,  # noqa: SIM401
+                        "expires_at": row["expires_at"],
                     }
                     return SessionInfo(
                         user_id=row["user_id"],

@@ -155,8 +155,8 @@ async def test_gateway_session_cookie_auth(test_env):
     )
     await db.conn.execute(
         """
-        INSERT INTO sessions (token, user_id, username, role)
-        VALUES (?, 'u-admin-1', 'admin_tester', 'admin')
+        INSERT INTO sessions (token, user_id, username, role, expires_at)
+        VALUES (?, 'u-admin-1', 'admin_tester', 'admin', '2099-01-01T00:00:00+00:00')
         """,
         (admin_session_token,),
     )
@@ -200,8 +200,8 @@ async def test_gateway_session_cookie_auth(test_env):
     )
     await db.conn.execute(
         """
-        INSERT INTO sessions (token, user_id, username, role)
-        VALUES (?, 'u-viewer-1', 'viewer_user', 'viewer')
+        INSERT INTO sessions (token, user_id, username, role, expires_at)
+        VALUES (?, 'u-viewer-1', 'viewer_user', 'viewer', '2099-01-01T00:00:00+00:00')
         """,
         (viewer_session_token,),
     )
@@ -408,6 +408,7 @@ async def test_gateway_audit_rows_carry_no_secrets(test_env):
 # Phase 03 retry1 QA-B P0-1/P0-2/P0-3: session expiry 401, session 429, audit
 # query preserved + denied rows. Evidence hashes in module docstring above.
 
+
 @pytest.mark.asyncio
 async def test_gateway_expired_session_401(test_env):
     """Retry1 P0-1: expired swarm_session (sess-expired) fails closed with 401."""
@@ -536,3 +537,126 @@ async def test_gateway_audit_logs_denied_calls(test_env):
     from panel_api.audit import AuditLogger
 
     assert await AuditLogger(db.conn).verify_chain() is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_session_null_empty_naive_fail_closed(test_env):
+    """Retry2 P0-1: NULL/''/whitespace/naive-past sessions 401; valid future 200."""
+    client, _, db = test_env
+    await db.conn.execute(
+        "INSERT INTO users (id, username, role) VALUES ('u-null-gw', 'null_gw', 'admin')"
+    )
+    for token, exp in [
+        ("sess-null", None),
+        ("sess-empty", ""),
+        ("sess-ws", "   "),
+        ("sess-naive-past", "2000-01-01T00:00:00"),
+    ]:
+        await db.conn.execute(
+            "INSERT OR REPLACE INTO sessions (token, user_id, username, role, expires_at)"
+            " VALUES (?, 'u-null-gw', 'null_gw', 'admin', ?)",
+            (token, exp),
+        )
+    await db.conn.execute(
+        "INSERT OR REPLACE INTO sessions (token, user_id, username, role, expires_at)"
+        " VALUES ('sess-valid', 'u-null-gw', 'null_gw', 'admin', '2099-01-01T00:00:00+00:00')",
+    )
+    await db.conn.commit()
+    body = {"jsonrpc": "2.0", "method": "tools/list", "id": 201}
+    for token in ["sess-null", "sess-empty", "sess-ws", "sess-naive-past"]:
+        r = await client.post("/mcp", cookies={"swarm_session": token}, json=body)
+        assert r.status_code == 401, token
+    r = await client.post("/mcp", cookies={"swarm_session": "sess-valid"}, json=body)
+    assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_gateway_old_db_missing_expires_col_no_500(test_env):
+    """Retry2 P0-1: legacy DB without sessions.expires_at never 500 (migrate + 401/200)."""
+    client, _, db = test_env
+    await db.conn.execute("ALTER TABLE sessions RENAME TO sessions_backup")
+    await db.conn.execute(
+        "CREATE TABLE sessions (token TEXT PRIMARY KEY, user_id TEXT NOT NULL,"
+        " username TEXT NOT NULL, role TEXT NOT NULL,"
+        " created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    )
+    await db.conn.execute(
+        "INSERT INTO users (id, username, role) VALUES ('u-old-1', 'old_user', 'admin')"
+    )
+    await db.conn.execute(
+        "INSERT INTO sessions (token, user_id, username, role)"
+        " VALUES ('sess-old-no-col', 'u-old-1', 'old_user', 'admin')"
+    )
+    await db.conn.commit()
+    body = {"jsonrpc": "2.0", "method": "tools/list", "id": 301}
+    r = await client.post("/mcp", cookies={"swarm_session": "sess-old-no-col"}, json=body)
+    # Migrated + fail-closed: 401 (expired sweep), never 500.
+    assert r.status_code == 401
+    assert r.status_code != 500
+
+
+@pytest.mark.asyncio
+async def test_gateway_denied_flood_sampled_not_unbounded(test_env):
+    """Retry2 P0-3: 25 identical 401s do not write 25 rows (cooldown sampling)."""
+    client, _, db = test_env
+    async with db.conn.execute("SELECT COUNT(*) AS n FROM audit_log") as cur:
+        before = (await cur.fetchone())["n"]
+    body = {"jsonrpc": "2.0", "method": "tools/list", "id": 401}
+    for _ in range(25):
+        r = await client.post(
+            "/mcp", headers={"Authorization": "Bearer bad_flood_token"}, json=body
+        )
+        assert r.status_code == 401
+    async with db.conn.execute("SELECT COUNT(*) AS n FROM audit_log") as cur:
+        after = (await cur.fetchone())["n"]
+    assert after - before < 25
+    assert after - before >= 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_audit_scrubs_bearer_and_token_query(test_env):
+    """Retry2 P0-2: swarm_sec_* in query redacted; ?token= in prose redacted; normal kept."""
+    client, raw_key, db = test_env
+    headers = {"Authorization": f"Bearer {raw_key}"}
+    leak_query = "lookup swarm_sec_deadbeef1234567890 for analysis"
+    await client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "web_search", "arguments": {"query": leak_query}},
+            "id": 501,
+        },
+    )
+    prose_query = "see https://example.com/path?token=SECRET123&x=1 for details"
+    await client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "web_search", "arguments": {"query": prose_query}},
+            "id": 502,
+        },
+    )
+    await client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "web_search", "arguments": {"query": "forensic query xyz123"}},
+            "id": 503,
+        },
+    )
+    async with db.conn.execute(
+        "SELECT target FROM audit_log WHERE action = 'web_search' ORDER BY id DESC LIMIT 3"
+    ) as cur:
+        rows = await cur.fetchall()
+    blob = " ".join((r["target"] or "") for r in rows)
+    assert "swarm_sec_deadbeef1234567890" not in blob
+    assert "SECRET123" not in blob
+    assert "?token=" not in blob
+    assert "forensic query xyz123" in blob
+    assert "example.com" in blob
