@@ -326,8 +326,26 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({
               <div className="font-semibold text-foreground flex items-center gap-1.5">
                 <Code className="h-3.5 w-3.5 text-primary" /> OpenCode Configuration
               </div>
+              {/* Phase 03-opencode-integration (P2-C1-C2-C3): operator path —
+                  file:///home/john/Projects/scraper-swarm/apps/panel-web/src/components/workbench/WorkbenchView.tsx */}
               <p className="text-[11px] text-muted-foreground">
-                Paste issued bearer tokens into your <code>opencode.json</code> under the <code>@scraper-swarm/opencode-plugin</code> block.
+                1) Click <span className="font-semibold text-foreground">+ Issue Key</span> above
+                (scopes <code>search</code> + <code>scrape</code>); the one-time{" "}
+                <code>raw_key</code> and <code>opencode_snippet</code> are shown once.
+                2) Paste the snippet into your <code>opencode.json</code> under the{" "}
+                <code>@scraper-swarm/opencode-plugin</code> block, replacing the{" "}
+                <code>url</code> host with this gateway origin and keeping the{" "}
+                <code>Authorization: Bearer …</code> header.
+                3) Test here: pick <code>web_search</code> / <code>fetch_page</code>,
+                press Execute, and expect HTTP 200 JSON-RPC output.
+              </p>
+              <p className="text-[11px] text-muted-foreground">
+                Fetch guard: the plugin blocks raw <code>webfetch</code>/<code>fetch</code> calls
+                and names the correct swarm MCP tool; this console already routes through{" "}
+                <code>/mcp</code>, so every call carries Bearer auth, per-tool scope checks
+                (search-only keys get 403 on scrape tools), SSRF pre-deny, and hash-chained
+                audit rows (<code>agent:&lt;name&gt;</code>). Revoked or expired keys get 401;
+                over-budget keys get 429 (per-key req/min shown beside each key).
               </p>
             </div>
           </div>

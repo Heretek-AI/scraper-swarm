@@ -1,4 +1,10 @@
-"""MCP Gateway server implementing Streamable HTTP transport and scoped tools."""
+"""MCP Gateway server implementing Streamable HTTP transport and scoped tools.
+
+Phase 03-opencode-integration (P2 OpenCode v2 live integration):
+- file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P2-C1-C2-C3
+- file:///home/john/Projects/scraper-swarm/apps/panel-api/src/panel_api/routers/agents.py
+- file:///home/john/Projects/scraper-swarm/apps/gateway/src/gateway/server.py
+"""
 
 from __future__ import annotations
 
@@ -7,6 +13,8 @@ import hashlib
 import json
 import logging
 import os
+import time
+from datetime import UTC, datetime
 from typing import Any
 
 import aiosqlite
@@ -24,6 +32,31 @@ CRAWL4AI_URL = os.environ.get("CRAWL4AI_URL", "http://crawl4ai:11235")
 DB_PATH = os.environ.get("SWARM_DB_PATH", "/var/lib/scraper-swarm/panel.db")
 
 mcp_server = MCPServer(name="ScraperSwarmGateway")
+
+# Phase 03: in-memory sliding-window rate limiter per agent-key id.
+# Window is 60s; each key's timestamps are pruned on check. This is a
+# single-process guard (documents the rpm contract); operators needing
+# multi-replica enforcement put a shared bucket in Valkey (see docs note).
+_RATE_BUCKETS: dict[str, list[float]] = {}
+
+
+def _check_rate_limit(key_id: str, rpm: int) -> None:
+    """Raises HTTP 429 when key_id exceeds rpm requests in the trailing 60s window."""
+    now = time.monotonic()
+    window_start = now - 60.0
+    hits = [t for t in _RATE_BUCKETS.get(key_id, []) if t > window_start]
+    if len(hits) >= max(1, rpm):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded ({rpm} req/min)",
+        )
+    hits.append(now)
+    _RATE_BUCKETS[key_id] = hits
+
+
+def _reset_rate_limits() -> None:
+    """Test hook: clears all sliding-window buckets (used between test cases)."""
+    _RATE_BUCKETS.clear()
 
 
 async def log_agent_activity(
@@ -57,8 +90,15 @@ async def verify_agent_token(
     auth_header: str | None = None,
     cookie_token: str | None = None,
     required_scope: str = "search",
+    enforce_rate_limit: bool = True,
 ) -> dict[str, Any]:
-    """Validates Bearer token against agent_keys or session cookie against sessions."""
+    """Validates Bearer token against agent_keys or session cookie against sessions.
+
+    Phase 03: expired keys -> 401; missing scope -> 403; over-rpm keys -> 429
+    via a per-key 60s sliding window. Per-tool re-verifications within one
+    request pass ``enforce_rate_limit=False`` so a single HTTP call costs one
+    rate-limit hit.
+    """
     # Allow scope to be passed as second positional argument if needed
     if cookie_token in ("search", "scrape", "admin"):
         required_scope = cookie_token
@@ -78,7 +118,8 @@ async def verify_agent_token(
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT id, name, scopes, rate_limit_rpm FROM agent_keys WHERE key_hash = ?",
+                "SELECT id, name, scopes, rate_limit_rpm, expires_at "
+                "FROM agent_keys WHERE key_hash = ?",
                 (token_hash,),
             ) as cur:
                 row = await cur.fetchone()
@@ -88,12 +129,41 @@ async def verify_agent_token(
                         detail="Invalid or revoked agent API key",
                     )
 
+                # Phase 03 AC5: expired keys fail closed with 401 (same as revoked).
+                try:
+                    expires_at = row["expires_at"]
+                except (KeyError, IndexError):
+                    expires_at = None
+                if expires_at:
+                    try:
+                        exp = datetime.fromisoformat(str(expires_at))
+                        if exp.tzinfo is None:
+                            exp = exp.replace(tzinfo=UTC)
+                        if exp <= datetime.now(UTC):
+                            raise HTTPException(
+                                status_code=status.HTTP_401_UNAUTHORIZED,
+                                detail="Agent API key expired",
+                            )
+                    except HTTPException:
+                        raise
+                    except Exception:
+                        # Unparseable expiry fails closed rather than granting access.
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Agent API key expiry invalid",
+                        ) from None
+
                 scopes = json.loads(row["scopes"])
                 if required_scope not in scopes and "admin" not in scopes:
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail=f"Key lacks required scope '{required_scope}'",
                     )
+
+                # Phase 03 AC5: sliding-window per-key rate limit (HTTP 429).
+                # Skipped for in-request per-tool re-verification (one HTTP call = one hit).
+                if enforce_rate_limit:
+                    _check_rate_limit(str(row["id"]), int(row["rate_limit_rpm"] or 60))
 
                 return dict(row)
 
@@ -366,6 +436,7 @@ def create_gateway_app() -> FastAPI:
                     auth_header=authorization,
                     cookie_token=cookie_val,
                     required_scope="scrape",
+                    enforce_rate_limit=False,
                 )
                 target_url = args.get("url", "")
                 await log_agent_activity(agent["name"], "fetch_page", target=target_url)
@@ -381,6 +452,7 @@ def create_gateway_app() -> FastAPI:
                     auth_header=authorization,
                     cookie_token=cookie_val,
                     required_scope="search",
+                    enforce_rate_limit=False,
                 )
                 q = args.get("query", "")
                 await log_agent_activity(agent["name"], "deep_research", target=q)
@@ -403,6 +475,7 @@ def create_gateway_app() -> FastAPI:
                     auth_header=authorization,
                     cookie_token=cookie_val,
                     required_scope="scrape",
+                    enforce_rate_limit=False,
                 )
                 target_url = args.get("url", "")
                 await log_agent_activity(agent["name"], "stealth_scrape", target=target_url)

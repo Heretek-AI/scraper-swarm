@@ -1,10 +1,18 @@
-"""Agent connections router for managing scoped API keys and OpenCode configurations."""
+"""Agent connections router for managing scoped API keys and OpenCode configurations.
+
+Phase 03-opencode-integration (P2 OpenCode v2 live integration):
+- file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P2-C1-C2-C3
+- file:///home/john/Projects/scraper-swarm/apps/panel-api/src/panel_api/routers/agents.py
+- file:///home/john/Projects/scraper-swarm/apps/gateway/src/gateway/server.py
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from panel_api.audit import AuditLogger
@@ -14,11 +22,21 @@ from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
+# Phase 03: allowlist for per-tool gateway scopes. Unknown scopes are rejected
+# fail-closed so a typo can never mint an over-privileged key.
+ALLOWED_SCOPES = frozenset({"search", "scrape", "admin"})
+
+# Phase 03: public MCP URL template for the one-time opencode.json snippet.
+# Operators override SWARM_PUBLIC_MCP_URL to their real gateway origin.
+SWARM_PUBLIC_MCP_URL = os.environ.get("SWARM_PUBLIC_MCP_URL", "https://swarm.example.com/mcp")
+
 
 class CreateAgentKeyRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     scopes: list[str] = Field(default=["search", "scrape"])
     rate_limit_rpm: int = Field(default=60, ge=1, le=1000)
+    # Phase 03: optional TTL in hours; stored as expires_at for gateway 401 enforcement.
+    expires_in_hours: int | None = Field(default=None, ge=1, le=8760)
 
 
 class CreateAgentKeyResponse(BaseModel):
@@ -28,6 +46,7 @@ class CreateAgentKeyResponse(BaseModel):
     key_prefix: str
     scopes: list[str]
     rate_limit_rpm: int
+    expires_at: str | None = None
     opencode_snippet: dict
 
 
@@ -45,12 +64,26 @@ async def create_agent_key(
 
     scopes_json = json.dumps(req.scopes)
 
+    # Phase 03: fail-closed scope validation (AC5 scope enforcement starts at issuance).
+    unknown = [s for s in req.scopes if s not in ALLOWED_SCOPES]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown scope(s): {unknown}. Allowed: {sorted(ALLOWED_SCOPES)}",
+        )
+    if not req.scopes:
+        raise HTTPException(status_code=422, detail="At least one scope is required")
+
+    expires_at: str | None = None
+    if req.expires_in_hours is not None:
+        expires_at = (datetime.now(UTC) + timedelta(hours=req.expires_in_hours)).isoformat()
+
     await db.conn.execute(
         """
-        INSERT INTO agent_keys (id, name, key_hash, key_prefix, scopes, rate_limit_rpm)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO agent_keys (id, name, key_hash, key_prefix, scopes, rate_limit_rpm, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (key_id, req.name, key_hash, key_prefix, scopes_json, req.rate_limit_rpm),
+        (key_id, req.name, key_hash, key_prefix, scopes_json, req.rate_limit_rpm, expires_at),
     )
     await db.conn.commit()
 
@@ -59,7 +92,8 @@ async def create_agent_key(
         actor=user.username,
         action="create_agent_key",
         target=key_id,
-        details={"name": req.name, "scopes": req.scopes},
+        # Phase 03: never log raw_key/key_hash — prefix + scopes only (no extra leakage).
+        details={"name": req.name, "scopes": req.scopes, "key_prefix": key_prefix},
     )
 
     opencode_snippet = {
@@ -68,13 +102,11 @@ async def create_agent_key(
         "mcp": {
             "scraper-swarm": {
                 "type": "remote",
-                "url": "https://swarm.example.com/mcp",
-                "headers": {
-                    "Authorization": f"Bearer {raw_key}"
-                },
-                "enabled": True
+                "url": SWARM_PUBLIC_MCP_URL,
+                "headers": {"Authorization": f"Bearer {raw_key}"},
+                "enabled": True,
             }
-        }
+        },
     }
 
     return CreateAgentKeyResponse(
@@ -84,6 +116,7 @@ async def create_agent_key(
         key_prefix=key_prefix,
         scopes=req.scopes,
         rate_limit_rpm=req.rate_limit_rpm,
+        expires_at=expires_at,
         opencode_snippet=opencode_snippet,
     )
 
@@ -94,7 +127,7 @@ async def list_agent_keys(
     user: SessionInfo = Depends(require_role("admin", "operator", "viewer")),
 ):
     query = (
-        "SELECT id, name, key_prefix, scopes, rate_limit_rpm, created_at "
+        "SELECT id, name, key_prefix, scopes, rate_limit_rpm, created_at, expires_at "
         "FROM agent_keys ORDER BY created_at DESC"
     )
     async with db.conn.execute(query) as cur:
@@ -107,6 +140,7 @@ async def list_agent_keys(
                 "scopes": json.loads(r["scopes"]),
                 "rate_limit_rpm": r["rate_limit_rpm"],
                 "created_at": r["created_at"],
+                "expires_at": r["expires_at"],
             }
             for r in rows
         ]
