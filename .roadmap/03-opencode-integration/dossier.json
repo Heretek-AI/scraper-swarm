@@ -2,12 +2,30 @@
   "phase": "03-opencode-integration",
   "goal": "P2 OpenCode v2 live integration: scoped agent key -> opencode.json snippet -> real agent web_search/fetch via MCP with audit chain + fetch guard proof",
   "evidence": [
-    {"hash": "file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P2-C1-C2-C3", "quote": "Generate Agent Key in Web Console; Load opencode.json in OpenCode v2; Verify Plugin intercepts raw webfetch"},
-    {"hash": "file:///home/john/Projects/scraper-swarm/apps/panel-api/src/panel_api/routers/agents.py", "quote": "POST /agents/keys scoped swarm_sec_* with key_prefix + opencode_snippet, hash stored"},
-    {"hash": "file:///home/john/Projects/scraper-swarm/apps/gateway/src/gateway/server.py", "quote": "verify_agent_token Bearer + swarm_session, per-tool scopes, log_agent_activity rw + sanitized"},
-    {"hash": "file:///home/john/Projects/scraper-swarm/packages/opencode-plugin/src/index.ts", "quote": "Typed tools + shell.env + fetch guard + commands/agent preset"},
-    {"hash": "file:///home/john/Projects/scraper-swarm/apps/panel-web/src/components/workbench/WorkbenchView.tsx", "quote": "Scoped key manager + interactive MCP test console (deep_research, stealth_scrape)"},
-    {"hash": "file:///home/john/Projects/scraper-swarm/.roadmap/02-infra-reconcile/dossier.json", "quote": "Reconciler persistent stack; test-all 3/3 + /mcp sentinel green baseline"}
+    {
+      "hash": "file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P2-C1-C2-C3",
+      "quote": "Generate Agent Key in Web Console; Load opencode.json in OpenCode v2; Verify Plugin intercepts raw webfetch"
+    },
+    {
+      "hash": "file:///home/john/Projects/scraper-swarm/apps/panel-api/src/panel_api/routers/agents.py",
+      "quote": "POST /agents/keys scoped swarm_sec_* with key_prefix + opencode_snippet, hash stored"
+    },
+    {
+      "hash": "file:///home/john/Projects/scraper-swarm/apps/gateway/src/gateway/server.py",
+      "quote": "verify_agent_token Bearer + swarm_session, per-tool scopes, log_agent_activity rw + sanitized"
+    },
+    {
+      "hash": "file:///home/john/Projects/scraper-swarm/packages/opencode-plugin/src/index.ts",
+      "quote": "Typed tools + shell.env + fetch guard + commands/agent preset"
+    },
+    {
+      "hash": "file:///home/john/Projects/scraper-swarm/apps/panel-web/src/components/workbench/WorkbenchView.tsx",
+      "quote": "Scoped key manager + interactive MCP test console (deep_research, stealth_scrape)"
+    },
+    {
+      "hash": "file:///home/john/Projects/scraper-swarm/.roadmap/02-infra-reconcile/dossier.json",
+      "quote": "Reconciler persistent stack; test-all 3/3 + /mcp sentinel green baseline"
+    }
   ],
   "acceptance": [
     "Create scoped key via live API with one-time raw_key + prefix + valid opencode_snippet, no extra leakage",
@@ -18,7 +36,7 @@
     "No regressions: catalog 10, pytest green, ruff clean, 401s, docs note"
   ],
   "brief": "Strict: key flow + snippet + scope checks + audit + guard tests + docs only. Cite hashes. No swarms/siblings. See GOAL.md.",
-  "verdict": "briefed-awaiting-programmer-approval",
+  "verdict": "escalated after 3 QA failures: qa-a pass (6 AC + pytest 126 + vitest 8/8) + qa-b fail (guard ruby/perl/lua/node/exe/homoglyph/env-split bypass, ftp userinfo + key scrub leak, flood rotation 15/25, legacy NOCASE missing) \u2014 commits 67ddd0f/dfc57b7/3314cf6; core P2 flow green, residuals tracked",
   "hashes": [
     "file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P2-C1-C2-C3",
     "file:///home/john/Projects/scraper-swarm/apps/panel-api/src/panel_api/routers/agents.py",
