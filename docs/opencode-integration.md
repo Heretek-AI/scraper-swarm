@@ -145,6 +145,60 @@ declared `direct_peers`, e.g. `gpt-researcher → searxng`); all other HTTP
 traverses Smokescreen. See `docs/robots-ua-decision.md` for the
 robots.txt/user-agent policy.
 
+## 3b. Contract v1 reference (ticket #5)
+
+Every `/mcp` response carries `X-Swarm-Contract: 1`, and `initialize`
+reports `serverInfo.contractVersion: 1`. **Bump rules:** additive changes
+(new optional fields, new tools, new codes) keep v1; any breaking change
+(removing/renaming fields, changing semantics, new required params) goes to
+v2 with a new header value — and the consumer (Heretek-AI/IUMBTEMS#107) is
+told in advance.
+
+`web_search` and `fetch_page` return **structured results** alongside the
+legacy text block (kept for older clients — always read `structuredContent`
+when present):
+
+```json
+{
+  "result": {
+    "content": [{"type": "text", "text": "Title: …\nURL: …\nSnippet: …\n---"}],
+    "structuredContent": {
+      "query": "latest rust web frameworks",
+      "results": [{"rank": 1, "title": "…", "url": "https://…", "snippet": "…", "engine": "searxng"}],
+      "engine": "searxng",
+      "fetched_at": "2026-10-09T00:00:00+00:00"
+    }
+  }
+}
+```
+
+`fetch_page.structuredContent`: `requested_url`, `final_url`, `status_code`,
+`content_type`, `title?`, `fetched_at`, `format` (`markdown`|`html`|`text`),
+`content`, `content_sha256` (SHA-256 over exactly the returned `content`
+bytes, UTF-8), `bytes`, `truncated`, `engine: "crawl4ai"`. Both tools publish
+`outputSchema` in `tools/list`, generated from the same models that build
+the payloads. `deep_research`/`stealth_scrape` stay text-only on success
+(their engine APIs are unverified) but use the error envelope below.
+
+**Errors** set `isError: true` with `structuredContent: {code, message,
+retry_after_s?}`:
+
+| Code | Used for |
+| --- | --- |
+| `invalid_params` | bad arguments (transport: JSON-RPC `-32602`) |
+| `ssrf_denied` | the SSRF pre-check refused the URL |
+| `blocked_by_policy` | reserved for future policy refusals (e.g. robots enforcement) |
+| `upstream_error` | an engine failed |
+| `upstream_timeout` | an engine timed out |
+| `rate_limited` | over the key's rate (transport: HTTP `429` + `Retry-After` header) |
+| `scope_denied` | the key lacks the scope (transport: HTTP `403`) |
+| `engine_unavailable` | the engine isn't deployed or healthy |
+
+Error messages never include internal hostnames or ports (engine base URLs
+are replaced with `<engine>`); SSRF reasons echo only the normalized host
+from the client's own URL. Seal-and-cite clients should verify
+`content_sha256` against `content` before citing.
+
 ## 4. Fetch guard (plugin) + Workbench path
 
 `packages/opencode-plugin` (`tool.execute.before`) **blocks** raw
