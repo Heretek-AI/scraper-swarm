@@ -15,7 +15,7 @@ import logging
 import os
 import time
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import aiosqlite
 import httpx
@@ -114,9 +114,15 @@ def _check_rate_limit(key_id: str, rpm: int) -> None:
         # with stale timestamps, then bound total cardinality.
         _RATE_BUCKETS[key_id] = hits
         _prune_rate_buckets(window_start)
+        # Ticket #5: 429 carries Retry-After (seconds until the oldest hit
+        # slides out of the window); the envelope equivalent is
+        # {code: rate_limited, retry_after_s}.
+        oldest = hits[0] if hits else now
+        retry_after = max(1, int(60.0 - (now - oldest)) + 1)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Rate limit exceeded ({rpm} req/min)",
+            headers={"Retry-After": str(retry_after)},
         )
     hits.append(now)
     _RATE_BUCKETS[key_id] = hits
@@ -546,7 +552,7 @@ async def verify_agent_token(
 
 
 @mcp_server.tool(name="web_search", description="Search the web using SearXNG meta-search engine.")
-async def web_search(query: str, limit: int = 5) -> str:
+async def web_search(query: str, limit: int = 5) -> dict[str, Any]:
     """Performs web search via SearXNG JSON endpoint.
 
     P1 Live Engine Stack Smoke Test (Phase 01-live-smoke): live path
@@ -554,14 +560,15 @@ async def web_search(query: str, limit: int = 5) -> str:
     Evidence: scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2,
     walkthrough.md::smoke-3-3, workbench_fix_walkthrough.md::mcp-proof.
 
-    Ticket #6: *limit* is clamped to [1, 20] so an automated client cannot
-    demand unbounded engine work per call.
+    Ticket #5: returns a contract-v1 dict (text + structured + is_error).
+    Ticket #6: *limit* is clamped to [1, 20].
     """
     try:
         limit = int(limit)
     except (TypeError, ValueError):
         limit = WEB_SEARCH_LIMIT_MIN
     limit = max(WEB_SEARCH_LIMIT_MIN, min(limit, WEB_SEARCH_LIMIT_MAX))
+    fetched_at = datetime.now(UTC).isoformat()
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.get(
@@ -570,23 +577,44 @@ async def web_search(query: str, limit: int = 5) -> str:
             )
             resp.raise_for_status()
             data = resp.json()
-            results = data.get("results", [])[:limit]
-            formatted = []
-            for r in results:
-                formatted.append(
-                    f"Title: {r.get('title')}\nURL: {r.get('url')}\n"
-                    f"Snippet: {r.get('content')}\n---"
-                )
-            return "\n".join(formatted) if formatted else "No results found."
+            items = data.get("results", [])[:limit] if isinstance(data, dict) else []
+            results = [
+                {
+                    "rank": i + 1,
+                    "title": str(r.get("title") or ""),
+                    "url": str(r.get("url") or ""),
+                    "snippet": str(r.get("content") or ""),
+                    "engine": "searxng",
+                }
+                for i, r in enumerate(items)
+                if isinstance(r, dict)
+            ]
+            formatted = [
+                f"Title: {x['title']}\nURL: {x['url']}\nSnippet: {x['snippet']}\n---"
+                for x in results
+            ]
+            text = "\n".join(formatted) if formatted else "No results found."
+            return {
+                "text": text,
+                "structured": {
+                    "query": query,
+                    "results": results,
+                    "engine": "searxng",
+                    "fetched_at": fetched_at,
+                },
+                "is_error": False,
+            }
+        except httpx.TimeoutException as e:
+            return _tool_error("upstream_timeout", f"SearXNG search timed out: {e}")
         except Exception as e:
-            return f"Error executing search on {SEARXNG_URL}: {e}"
+            return _tool_error("upstream_error", f"SearXNG search failed: {e}")
 
 
 @mcp_server.tool(
     name="fetch_page",
     description="Scrape and extract markdown content from a webpage using Crawl4AI.",
 )
-async def fetch_page(url: str) -> str:
+async def fetch_page(url: str) -> dict[str, Any]:
     """Scrapes a URL using Crawl4AI REST endpoint.
 
     P1 Live Engine Stack Smoke Test (Phase 01-live-smoke): live path
@@ -599,6 +627,9 @@ async def fetch_page(url: str) -> str:
     Evidence: scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2,
     walkthrough.md::smoke-3-3, workbench_fix_walkthrough.md::mcp-proof.
 
+    Ticket #5: returns a contract-v1 dict with final_url, status_code,
+    content_type, content_sha256 (over the returned content bytes), and a
+    truncation flag.
     Ticket #6: a resolver outage/timeout fails closed by default
     (SWARM_SSRF_RESOLVER_FAIL_CLOSED opt-out) instead of delegating blindly.
     """
@@ -607,33 +638,99 @@ async def fetch_page(url: str) -> str:
     except Exception:
         denial = "DNS resolution unavailable (fail-closed)" if resolver_fail_closed() else None
     if denial is not None:
-        return f"SSRF denied (fail-closed): {denial}"
+        return _tool_error("ssrf_denied", f"SSRF denied (fail-closed): {denial}")
     async with httpx.AsyncClient(timeout=45.0) as client:
         try:
             # 1. Try Crawl4AI /md endpoint
+            data: Any = None
             resp = await client.post(
                 f"{CRAWL4AI_URL}/md",
                 json={"url": url},
             )
             if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, dict):
-                    return data.get("markdown", data.get("html", str(data)))
-                return str(data)
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = None
 
-            # 2. Fallback to /crawl endpoint
-            resp = await client.post(
-                f"{CRAWL4AI_URL}/crawl",
-                json={"urls": [url]},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if "results" in data and data["results"]:
-                first = data["results"][0]
-                return first.get("markdown", first.get("html", "No content extracted."))
-            return str(data)
+            if data is None:
+                # 2. Fallback to /crawl endpoint
+                resp = await client.post(
+                    f"{CRAWL4AI_URL}/crawl",
+                    json={"urls": [url]},
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+                if isinstance(payload, dict) and payload.get("results"):
+                    first = payload["results"][0]
+                    data = first if isinstance(first, dict) else {"text": str(first)}
+                else:
+                    data = payload
+            return _fetch_success(url, data)
+        except httpx.TimeoutException as e:
+            return _tool_error("upstream_timeout", f"Crawl4AI fetch timed out: {e}")
         except Exception as e:
-            return f"Error crawling page via {CRAWL4AI_URL}: {e}"
+            return _tool_error("upstream_error", f"Crawl4AI fetch failed: {e}")
+
+
+def _first_markdown_heading(content: str, format: str) -> str | None:
+    if format != "markdown":
+        return None
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip() or None
+    return None
+
+
+def _fetch_success(requested_url: str, data: Any) -> dict[str, Any]:
+    """Builds the contract-v1 fetch_page result from an engine payload."""
+    fetched_at = datetime.now(UTC).isoformat()
+    if not isinstance(data, dict):
+        data = {"text": str(data)}
+    markdown = data.get("markdown")
+    html = data.get("html")
+    if isinstance(markdown, str) and markdown:
+        content, format = markdown, "markdown"
+    elif isinstance(html, str) and html:
+        content, format = html, "html"
+    else:
+        content, format = str(data.get("text", str(data))), "text"
+    raw = content.encode("utf-8")
+    truncated = len(raw) > MAX_FETCH_BYTES
+    if truncated:
+        content = raw[:MAX_FETCH_BYTES].decode("utf-8", errors="ignore")
+        raw = content.encode("utf-8")
+    title = data.get("title")
+    if not isinstance(title, str) or not title:
+        title = _first_markdown_heading(content, format)
+    final_url = data.get("final_url") or data.get("url")
+    if not isinstance(final_url, str) or not final_url:
+        final_url = requested_url
+    status_code = data.get("status_code")
+    if isinstance(status_code, bool) or not isinstance(status_code, int):
+        status_code = 200
+    content_type = data.get("content_type")
+    if not isinstance(content_type, str):
+        content_type = None
+    return {
+        "text": content,
+        "structured": {
+            "requested_url": requested_url,
+            "final_url": final_url,
+            "status_code": status_code,
+            "content_type": content_type,
+            "title": title,
+            "fetched_at": fetched_at,
+            "format": format,
+            "content": content,
+            "content_sha256": hashlib.sha256(raw).hexdigest(),
+            "bytes": len(raw),
+            "truncated": truncated,
+            "engine": "crawl4ai",
+        },
+        "is_error": False,
+    }
 
 
 async def _probe_engine(base_url: str) -> dict[str, Any]:
@@ -710,6 +807,125 @@ class StealthScrapeArgs(BaseModel):
     )
 
 
+# ---- Ticket #5 (contract v1: structured results, error codes, version) -----
+#
+# Contract version 1: every /mcp response carries X-Swarm-Contract: 1 and
+# initialize reports contractVersion 1. Bump rules: additive changes keep v1;
+# breaking changes go to v2 (documented in docs/opencode-integration.md).
+CONTRACT_VERSION = 1
+
+# Machine-readable error codes. Transport-level failures keep their HTTP
+# mapping (invalid_params -> -32602, scope_denied -> 403, rate_limited ->
+# 429 + Retry-After); execution failures ride the isError envelope below.
+ERROR_CODES = (
+    "invalid_params",
+    "ssrf_denied",
+    "blocked_by_policy",  # reserved: future policy refusals (e.g. robots enforcement)
+    "upstream_error",
+    "upstream_timeout",
+    "rate_limited",
+    "scope_denied",
+    "engine_unavailable",
+)
+
+
+class SearchResultItem(BaseModel):
+    rank: int
+    title: str
+    url: str
+    snippet: str
+    engine: str = "searxng"
+
+
+class WebSearchStructured(BaseModel):
+    query: str
+    results: list[SearchResultItem]
+    engine: str = "searxng"
+    fetched_at: str
+
+
+class FetchPageStructured(BaseModel):
+    requested_url: str
+    final_url: str
+    status_code: int
+    content_type: str | None = None
+    title: str | None = None
+    fetched_at: str
+    format: Literal["markdown", "html", "text"]
+    content: str
+    content_sha256: str
+    bytes: int
+    truncated: bool
+    engine: str = "crawl4ai"
+
+
+class ErrorStructured(BaseModel):
+    code: str
+    message: str
+    retry_after_s: int | None = None
+
+
+def _scrub_internal_urls(text: str) -> str:
+    """Replaces engine base URLs with engine names so client-visible errors
+    never leak internal hostnames or ports (ticket #5)."""
+    for name, base in (
+        ("searxng", SEARXNG_URL),
+        ("crawl4ai", CRAWL4AI_URL),
+        ("scrapling", SCRAPLING_URL),
+        ("gpt-researcher", GPT_RESEARCHER_URL),
+    ):
+        if base:
+            text = text.replace(base, f"<{name}>")
+    return text
+
+
+def _tool_error(code: str, message: str, retry_after_s: int | None = None) -> dict[str, Any]:
+    """Builds an isError tool result with a machine-readable code."""
+    structured: dict[str, Any] = {"code": code, "message": _scrub_internal_urls(str(message))}
+    if retry_after_s is not None:
+        structured["retry_after_s"] = retry_after_s
+    return {
+        "text": structured["message"],
+        "structured": structured,
+        "is_error": True,
+        "code": code,
+    }
+
+
+def _render_tool_result(rpc_id: Any, result: Any) -> dict[str, Any]:
+    """Renders a tool outcome as JSON-RPC result: legacy text-only for plain
+    strings (mocked/older paths), text + structuredContent + isError for
+    contract-v1 dict results. The text block is always kept for older clients."""
+    if isinstance(result, dict) and "structured" in result:
+        out: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {
+                "content": [{"type": "text", "text": _cap_text(str(result.get("text", "")))}],
+                "structuredContent": result["structured"],
+            },
+        }
+        if result.get("is_error"):
+            out["result"]["isError"] = True
+        return out
+    return {
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "result": {"content": [{"type": "text", "text": _cap_text(str(result))}]},
+    }
+
+
+def _engine_unavailable(name: str) -> dict[str, Any] | None:
+    """Returns an engine_unavailable error result when the tool's engine is
+    not deployed, else None."""
+    engine = _TOOL_SPECS[name][2]
+    if engine in _deployed_engines():
+        return None
+    return _tool_error(
+        "engine_unavailable", f"Engine '{engine}' for tool '{name}' is not deployed or healthy"
+    )
+
+
 # name -> (arguments model, required scope, backing engine, description)
 _TOOL_SPECS: dict[str, tuple[type[BaseModel], str, str, str]] = {
     "web_search": (
@@ -763,6 +979,12 @@ def _visible_tools(scopes: list[str]) -> list[dict[str, Any]]:
         if engine not in deployed:
             continue
         out.append({"name": name, "description": desc, "inputSchema": model.model_json_schema()})
+        # Ticket #5: outputSchema for the structured tools (deep_research and
+        # stealth_scrape carry the error-code envelope only).
+        if name == "web_search":
+            out[-1]["outputSchema"] = WebSearchStructured.model_json_schema()
+        elif name == "fetch_page":
+            out[-1]["outputSchema"] = FetchPageStructured.model_json_schema()
     return out
 
 
@@ -788,6 +1010,14 @@ def create_gateway_app() -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.middleware("http")
+    async def _contract_version_header(request: Request, call_next):
+        """Ticket #5: every /mcp response carries X-Swarm-Contract: 1."""
+        response = await call_next(request)
+        if request.url.path == "/mcp":
+            response.headers["X-Swarm-Contract"] = str(CONTRACT_VERSION)
+        return response
 
     @app.get("/ready")
     async def ready():
@@ -898,7 +1128,11 @@ def create_gateway_app() -> FastAPI:
                 "result": {
                     "protocolVersion": negotiated,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "ScraperSwarmGateway", "version": GATEWAY_VERSION},
+                    "serverInfo": {
+                        "name": "ScraperSwarmGateway",
+                        "version": GATEWAY_VERSION,
+                        "contractVersion": CONTRACT_VERSION,
+                    },
                 },
             }
 
@@ -970,15 +1204,14 @@ def create_gateway_app() -> FastAPI:
                     raise
                 q = args.query
                 limit = _clamp_limit(args.limit)
+                unavailable = _engine_unavailable("web_search")
+                if unavailable is not None:
+                    return _render_tool_result(rpc_id, unavailable)
                 await log_agent_activity(
                     agent["name"], "web_search", target=q, details={"limit": limit}
                 )
                 result = await web_search(query=q, limit=limit)
-                return {
-                    "jsonrpc": "2.0",
-                    "id": rpc_id,
-                    "result": {"content": [{"type": "text", "text": _cap_text(result)}]},
-                }
+                return _render_tool_result(rpc_id, result)
 
             elif name == "fetch_page":
                 args = cast(FetchPageArgs, args)
@@ -1003,22 +1236,16 @@ def create_gateway_app() -> FastAPI:
                 # tool function checks again before delegating to Crawl4AI).
                 denial = await _ssrf_precheck(target_url)
                 if denial is not None:
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": rpc_id,
-                        "result": {
-                            "content": [
-                                {"type": "text", "text": f"SSRF denied (fail-closed): {denial}"}
-                            ]
-                        },
-                    }
+                    return _render_tool_result(
+                        rpc_id,
+                        _tool_error("ssrf_denied", f"SSRF denied (fail-closed): {denial}"),
+                    )
+                unavailable = _engine_unavailable("fetch_page")
+                if unavailable is not None:
+                    return _render_tool_result(rpc_id, unavailable)
                 await log_agent_activity(agent["name"], "fetch_page", target=target_url)
                 result = await fetch_page(url=target_url)
-                return {
-                    "jsonrpc": "2.0",
-                    "id": rpc_id,
-                    "result": {"content": [{"type": "text", "text": _cap_text(result)}]},
-                }
+                return _render_tool_result(rpc_id, result)
 
             elif name == "deep_research":
                 args = cast(DeepResearchArgs, args)
@@ -1039,6 +1266,9 @@ def create_gateway_app() -> FastAPI:
                         )
                     raise
                 q = args.query
+                unavailable = _engine_unavailable("deep_research")
+                if unavailable is not None:
+                    return _render_tool_result(rpc_id, unavailable)
                 await log_agent_activity(agent["name"], "deep_research", target=q)
                 async with httpx.AsyncClient(timeout=120.0) as client:
                     try:
@@ -1046,8 +1276,16 @@ def create_gateway_app() -> FastAPI:
                             "http://gpt-researcher:8000/research", json={"query": q}
                         )
                         result = r.text
+                    except httpx.TimeoutException as e:
+                        return _render_tool_result(
+                            rpc_id,
+                            _tool_error("upstream_timeout", f"GPT Researcher timed out: {e}"),
+                        )
                     except Exception as e:
-                        result = f"GPT Researcher error: {e}"
+                        return _render_tool_result(
+                            rpc_id,
+                            _tool_error("upstream_error", f"GPT Researcher error: {e}"),
+                        )
                 return {
                     "jsonrpc": "2.0",
                     "id": rpc_id,
@@ -1079,15 +1317,13 @@ def create_gateway_app() -> FastAPI:
                 # Deny here (and the Scrapling path is never contacted).
                 denial = await _ssrf_precheck(target_url)
                 if denial is not None:
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": rpc_id,
-                        "result": {
-                            "content": [
-                                {"type": "text", "text": f"SSRF denied (fail-closed): {denial}"}
-                            ]
-                        },
-                    }
+                    return _render_tool_result(
+                        rpc_id,
+                        _tool_error("ssrf_denied", f"SSRF denied (fail-closed): {denial}"),
+                    )
+                unavailable = _engine_unavailable("stealth_scrape")
+                if unavailable is not None:
+                    return _render_tool_result(rpc_id, unavailable)
                 await log_agent_activity(agent["name"], "stealth_scrape", target=target_url)
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     try:
@@ -1095,8 +1331,15 @@ def create_gateway_app() -> FastAPI:
                             "http://scrapling:8000/fetch", json={"url": target_url}
                         )
                         result = r.text
+                    except httpx.TimeoutException as e:
+                        return _render_tool_result(
+                            rpc_id,
+                            _tool_error("upstream_timeout", f"Scrapling timed out: {e}"),
+                        )
                     except Exception as e:
-                        result = f"Scrapling error: {e}"
+                        return _render_tool_result(
+                            rpc_id, _tool_error("upstream_error", f"Scrapling error: {e}")
+                        )
                 return {
                     "jsonrpc": "2.0",
                     "id": rpc_id,
@@ -1134,7 +1377,9 @@ def create_gateway_app() -> FastAPI:
             agent["name"], "web_search", target=req.query, details={"limit": req.limit}
         )
         result = await web_search(query=req.query, limit=req.limit)
-        return {"query": req.query, "result": _cap_text(result)}
+        # Ticket #5: the REST shape stays text-only; structure lives on /mcp.
+        text = result["text"] if isinstance(result, dict) else str(result)
+        return {"query": req.query, "result": _cap_text(text)}
 
     @app.post("/api/fetch")
     async def rest_fetch(
@@ -1162,7 +1407,9 @@ def create_gateway_app() -> FastAPI:
             raise
         await log_agent_activity(agent["name"], "fetch_page", target=req.url)
         result = await fetch_page(url=req.url)
-        return {"url": req.url, "result": _cap_text(result)}
+        # Ticket #5: the REST shape stays text-only; structure lives on /mcp.
+        text = result["text"] if isinstance(result, dict) else str(result)
+        return {"url": req.url, "result": _cap_text(text)}
 
     return app
 
