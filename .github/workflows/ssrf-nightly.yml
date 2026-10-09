@@ -35,7 +35,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --all-packages
 
       - name: Run SSRF container tests
         run: uv run pytest tests/security/test_ssrf.py -v --tb=short
