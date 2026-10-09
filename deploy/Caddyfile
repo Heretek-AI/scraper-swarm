@@ -15,6 +15,16 @@
         reverse_proxy gateway:8000
     }
 
+    # Ticket #7: readiness + liveness routed to the gateway (previously
+    # /health fell through to the SPA).
+    handle /ready {
+        reverse_proxy gateway:8000
+    }
+
+    handle /health {
+        reverse_proxy gateway:8000
+    }
+
     handle /api/* {
         reverse_proxy gateway:8000
     }

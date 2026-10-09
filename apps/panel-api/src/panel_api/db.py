@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS agent_keys (
     scopes TEXT NOT NULL,     -- JSON array of scopes, e.g. ["search", "scrape"]
     rate_limit_rpm INTEGER DEFAULT 60,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP
+    expires_at TIMESTAMP,
+    last_used_at TIMESTAMP -- Ticket #7: service-account observability, throttled writes
 );
 
 CREATE TABLE IF NOT EXISTS installed_services (
@@ -127,6 +128,16 @@ class Database:
             # per-request NOCASE SELECT + IntegrityError path still 409s new
             # conflicts without breaking connect on old DBs.
             _log.debug("Agent-key NOCASE index skipped: %s", e)
+        try:
+            # Ticket #7: legacy DBs predate last_used_at (service-account
+            # observability). ADD COLUMN is idempotent-safe via PRAGMA check.
+            async with self._conn.execute("PRAGMA table_info(agent_keys)") as cur:
+                key_cols = [r["name"] for r in await cur.fetchall()]
+            if key_cols and "last_used_at" not in key_cols:
+                await self._conn.execute("ALTER TABLE agent_keys ADD COLUMN last_used_at TIMESTAMP")
+                await self._conn.commit()
+        except Exception as e:
+            _log.debug("Agent-key last_used_at migration skipped: %s", e)
 
     async def close(self) -> None:
         if self._conn:
