@@ -30,6 +30,35 @@ curl -s -b "swarm_session=$SESSION" -X POST https://<panel>/agents/keys \
   -d '{"name":"opencode-coder-1","scopes":["search","scrape"],"expires_in_hours":720}'
 ```
 
+### Service-account keys for automation (ticket #7)
+
+Human TOTP sessions are for operators; automated clients get keys from the
+host via `swarmctl` (host shell access is the authorization, consistent with
+the bootstrap model — there is no network path to minting):
+
+```bash
+docker compose exec panel-api swarmctl keys create \
+  --name research-svc --scopes search,scrape --expires 90d
+docker compose exec panel-api swarmctl keys rotate research-svc --grace 24h
+docker compose exec panel-api swarmctl keys list
+```
+
+`create` prints the raw key **once** (only the hash is stored). `rotate`
+renames the old row (valid until `--grace` elapses) and mints a same-named
+successor with the same scopes — zero-downtime rotation. Key creation works
+without `allow_placeholder_host` once `SWARM_PUBLIC_MCP_URL` is configured
+(compose passes it through; see `.env.example`). Every successful gateway
+call refreshes `last_used_at` (throttled to one write per key per minute;
+visible in `GET /agents/keys` and `swarmctl keys list`).
+
+### Readiness
+
+`GET /ready` (routed through Caddy, like `/health`) reports
+`{ready, db, engines: {searxng, crawl4ai, scrapling, gpt-researcher}}` with
+per-engine `{ok, ms, status}` — `ready` is true only when the DB answers and
+every engine is reachable. `tools/list` filtering (#4) consumes the same
+engine set via `SWARM_DEPLOYED_ENGINES` until it is wired to `/ready`.
+
 ## 2. Load `opencode.json` in OpenCode v2
 
 Paste the returned snippet into `opencode.json`, replacing `url` with this

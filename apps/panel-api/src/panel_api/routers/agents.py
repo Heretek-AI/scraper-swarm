@@ -8,16 +8,14 @@ Phase 03-opencode-integration (P2 OpenCode v2 live integration):
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import secrets
-import sqlite3
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from panel_api.audit import AuditLogger
 from panel_api.db import Database
+from panel_api.keys import KeyExistsError, mint_key
 from panel_api.routers.auth import SessionInfo, get_db, require_role
 from pydantic import BaseModel, Field
 
@@ -114,7 +112,10 @@ async def create_agent_key(
     # Phase 03 retry2 QA-B P0-5: case-insensitive dup check (NOCASE) plus a
     # UNIQUE NOCASE constraint as the race backstop (see db.py migration).
     # Check-then-insert alone races under concurrency; the constraint turns
-    # the loser into IntegrityError -> 409 below.
+    # the loser into IntegrityError -> 409 below. Ticket #7: the check-then-
+    # insert core lives in keys.mint_key (shared with swarmctl); the
+    # pre-check here preserves the exact 409 message, the constraint is the
+    # backstop.
     async with db.conn.execute(
         "SELECT id FROM agent_keys WHERE name = ? COLLATE NOCASE", (clean_name,)
     ) as cur:
@@ -130,14 +131,6 @@ async def create_agent_key(
             detail="expires_in_hours=None creates a never-expiring key; "
             "pass allow_never_expire=true to acknowledge or set a TTL",
         )
-
-    key_id = secrets.token_hex(16)
-    # Generate high-entropy bearer token: swarm_sec_<32 hex>
-    raw_key = f"swarm_sec_{secrets.token_hex(24)}"
-    key_prefix = raw_key[:14] + "..."
-    key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
-
-    scopes_json = json.dumps(deduped_scopes)
 
     expires_at: str | None = None
     if req.expires_in_hours is not None:
@@ -157,30 +150,23 @@ async def create_agent_key(
             "acknowledge sharing a live key with a dead host",
         )
 
+    # Ticket #7: storage goes through the shared mint (same columns, same
+    # NOCASE race backstop -> 409). Gates above run before any row is minted.
     try:
-        await db.conn.execute(
-            """
-            INSERT INTO agent_keys
-                (id, name, key_hash, key_prefix, scopes, rate_limit_rpm, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                key_id,
-                clean_name,
-                key_hash,
-                key_prefix,
-                scopes_json,
-                req.rate_limit_rpm,
-                expires_at,
-            ),
+        minted = await mint_key(
+            db.conn,
+            name=clean_name,
+            scopes=deduped_scopes,
+            rate_limit_rpm=req.rate_limit_rpm,
+            expires_at=expires_at,
         )
-        await db.conn.commit()
-    except sqlite3.IntegrityError:
+    except KeyExistsError:
         # UNIQUE NOCASE loser of a concurrent same-name race (or a
         # case-variant squat): fail 409, never 500, never a second live key.
         raise HTTPException(
             status_code=409, detail=f"Agent key name '{clean_name}' already exists"
         ) from None
+    key_id, raw_key, key_prefix = minted["id"], minted["raw_key"], minted["key_prefix"]
 
     logger = AuditLogger(db.conn)
     await logger.log(
@@ -238,8 +224,8 @@ async def list_agent_keys(
     user: SessionInfo = Depends(require_role("admin", "operator", "viewer")),
 ):
     query = (
-        "SELECT id, name, key_prefix, scopes, rate_limit_rpm, created_at, expires_at "
-        "FROM agent_keys ORDER BY created_at DESC"
+        "SELECT id, name, key_prefix, scopes, rate_limit_rpm, created_at, expires_at, "
+        "last_used_at FROM agent_keys ORDER BY created_at DESC"
     )
     async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
@@ -252,6 +238,7 @@ async def list_agent_keys(
                 "rate_limit_rpm": r["rate_limit_rpm"],
                 "created_at": r["created_at"],
                 "expires_at": r["expires_at"],
+                "last_used_at": r["last_used_at"],
             }
             for r in rows
         ]

@@ -35,6 +35,12 @@ The bootstrap script will:
 
 Once started, open your browser to **`http://localhost`** (or `https://<your-server-ip>`).
 
+Operator environment (ticket #7): copy `.env.example` to `.env` and set
+`SWARM_PUBLIC_MCP_URL` (public gateway origin used in key-issuance snippets)
+and `SWARM_DOMAIN` (Caddy domain) before launching; compose passes both to
+`panel-api`. `GET /ready` and `GET /health` are routed through Caddy to the
+gateway for load-balancer/orchestrator checks.
+
 ---
 
 ## 3. Zero-Trust Remote Access

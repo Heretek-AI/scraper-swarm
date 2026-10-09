@@ -28,6 +28,10 @@ services:
       - SWARM_DATA_DIR=/var/lib/scraper-swarm
       - SWARM_REPO_ROOT=/opt/scraper-swarm
       - SWARM_BOOTSTRAP_TOKEN
+      # Ticket #7: public MCP origin for key-issuance snippets, and the
+      # external domain (Caddy uses SWARM_DOMAIN). See .env.example.
+      - SWARM_PUBLIC_MCP_URL=${SWARM_PUBLIC_MCP_URL:-}
+      - SWARM_DOMAIN=${SWARM_DOMAIN:-localhost}
     volumes:
       - swarm_data:/var/lib/scraper-swarm
       - ../catalog:/opt/scraper-swarm/catalog:ro,z

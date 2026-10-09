@@ -37,6 +37,8 @@ log = logging.getLogger(__name__)
 
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://searxng:8080")
 CRAWL4AI_URL = os.environ.get("CRAWL4AI_URL", "http://crawl4ai:11235")
+SCRAPLING_URL = os.environ.get("SCRAPLING_URL", "http://scrapling:8000")
+GPT_RESEARCHER_URL = os.environ.get("GPT_RESEARCHER_URL", "http://gpt-researcher:8000")
 DB_PATH = os.environ.get("SWARM_DB_PATH", "/var/lib/scraper-swarm/panel.db")
 
 mcp_server = MCPServer(name="ScraperSwarmGateway")
@@ -139,6 +141,7 @@ def _reset_rate_limits() -> None:
     """Test hook: clears all sliding-window buckets (used between test cases)."""
     _RATE_BUCKETS.clear()
     _DENIED_AUDIT_LAST.clear()
+    _LAST_USED_TOUCH.clear()
 
 
 # Phase 03 retry2 QA-B P0-3: denied-row flood guard. Every 401/403/429/
@@ -266,15 +269,61 @@ async def _ensure_gateway_session_schema(db: aiosqlite.Connection) -> None:
 
 
 async def _ensure_gateway_agent_key_schema(db: aiosqlite.Connection) -> None:
-    """Best-effort legacy migration for old DBs missing agent_keys.expires_at."""
+    """Best-effort legacy migration for old DBs missing agent_keys columns."""
     try:
         async with db.execute("PRAGMA table_info(agent_keys)") as cur:
             cols = [r["name"] for r in await cur.fetchall()]
         if cols and "expires_at" not in cols:
             await db.execute("ALTER TABLE agent_keys ADD COLUMN expires_at TIMESTAMP")
             await db.commit()
+        # Ticket #7: legacy DBs predate last_used_at (service-account use).
+        async with db.execute("PRAGMA table_info(agent_keys)") as cur:
+            cols = [r["name"] for r in await cur.fetchall()]
+        if cols and "last_used_at" not in cols:
+            await db.execute("ALTER TABLE agent_keys ADD COLUMN last_used_at TIMESTAMP")
+            await db.commit()
     except Exception as e:
         log.debug("Gateway agent-key schema migration skipped: %s", e)
+
+
+# Ticket #7: last_used_at is refreshed at most once per key per window so a
+# high-rpm service key does not turn every request into a DB write.
+_LAST_USED_TOUCH: dict[str, float] = {}
+_LAST_USED_TOUCH_WINDOW_S = 60.0
+
+
+async def _maybe_touch_last_used(key_id: str) -> None:
+    """Best-effort throttled last_used_at refresh; never raises."""
+    try:
+        now = time.monotonic()
+        if now - _LAST_USED_TOUCH.get(key_id, 0.0) < _LAST_USED_TOUCH_WINDOW_S:
+            return
+        _LAST_USED_TOUCH[key_id] = now
+        if not os.path.exists(DB_PATH):
+            return
+        async with aiosqlite.connect(DB_PATH) as db:
+            try:
+                await db.execute(
+                    "UPDATE agent_keys SET last_used_at = ? WHERE id = ?",
+                    (datetime.now(UTC).isoformat(), key_id),
+                )
+                await db.commit()
+            except Exception as e:
+                # Legacy DBs predate the column: migrate once, retry once.
+                if "no such column" in str(e).lower():
+                    await _ensure_gateway_agent_key_schema(db)
+                    try:
+                        await db.execute(
+                            "UPDATE agent_keys SET last_used_at = ? WHERE id = ?",
+                            (datetime.now(UTC).isoformat(), key_id),
+                        )
+                        await db.commit()
+                    except Exception as retry_e:
+                        log.debug("last_used_at retry skipped for %s: %s", key_id, retry_e)
+                else:
+                    log.debug("last_used_at refresh skipped for %s: %s", key_id, e)
+    except Exception as e:
+        log.debug("last_used_at refresh skipped for %s: %s", key_id, e)
 
 
 async def verify_agent_token(
@@ -404,6 +453,9 @@ async def verify_agent_token(
             # Skipped for in-request per-tool re-verification (one HTTP call = one hit).
             if enforce_rate_limit:
                 _check_rate_limit(str(row["id"]), int(row["rate_limit_rpm"] or 60))
+
+            # Ticket #7: throttled last-used refresh for service-account observability.
+            await _maybe_touch_last_used(str(row["id"]))
 
             return dict(row)
 
@@ -584,6 +636,38 @@ async def fetch_page(url: str) -> str:
             return f"Error crawling page via {CRAWL4AI_URL}: {e}"
 
 
+async def _probe_engine(base_url: str) -> dict[str, Any]:
+    """Probes one engine base URL; any HTTP response counts as reachable."""
+    start = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(base_url)
+        return {
+            "ok": True,
+            "ms": int((time.monotonic() - start) * 1000),
+            "status": resp.status_code,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "ms": int((time.monotonic() - start) * 1000),
+            "status": None,
+            "error": type(e).__name__,
+        }
+
+
+async def _check_db() -> tuple[bool, str | None]:
+    """True/None when the panel DB answers; False/reason otherwise."""
+    if not os.path.exists(DB_PATH):
+        return False, f"database path {DB_PATH} missing"
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("SELECT 1")
+        return True, None
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
 class SearchRequest(BaseModel):
     query: str
     limit: int = Field(default=5, ge=WEB_SEARCH_LIMIT_MIN, le=WEB_SEARCH_LIMIT_MAX)
@@ -704,6 +788,30 @@ def create_gateway_app() -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.get("/ready")
+    async def ready():
+        """Deep readiness: DB reachable plus per-engine liveness with latency.
+
+        Ticket #7: operators (and #4's tools/list engine filter, once wired)
+        need a truthful readiness picture. Any HTTP response counts the engine
+        as reachable; transport errors mark it down. Routed through Caddy
+        (deploy/Caddyfile) alongside /health.
+        """
+        engines: dict[str, dict[str, Any]] = {}
+        for name, base in (
+            ("searxng", SEARXNG_URL),
+            ("crawl4ai", CRAWL4AI_URL),
+            ("scrapling", SCRAPLING_URL),
+            ("gpt-researcher", GPT_RESEARCHER_URL),
+        ):
+            engines[name] = await _probe_engine(base)
+        db_ok, db_error = await _check_db()
+        return {
+            "ready": db_ok and all(e["ok"] for e in engines.values()),
+            "db": {"ok": db_ok, **({"error": db_error} if db_error else {})},
+            "engines": engines,
+        }
 
     @app.post("/mcp")
     async def mcp_handler(

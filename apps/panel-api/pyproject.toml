@@ -31,6 +31,9 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[project.scripts]
+swarmctl = "panel_api.swarmctl:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/panel_api"]
 
