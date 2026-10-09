@@ -86,6 +86,20 @@ Expected status codes:
 Multi-replica deployments needing a shared budget should move the bucket to
 Valkey; the gateway helper (`_check_rate_limit`) is the seam.
 
+Request/response bounds (ticket #6): `web_search` `limit` is clamped to
+`1–20` (REST `POST /api/search` validates `422` outside that range); URLs
+over `2048` characters are SSRF-denied without DNS; fetched result text is
+capped at `SWARM_MAX_FETCH_BYTES` (default 3 MiB) with a
+`…[truncated: showing X of Y bytes]` marker. Unresolvable hostnames and
+resolver outages fail closed (`SSRF denied`) by default; operators may opt
+back into Smokescreen-only delegation with
+`SWARM_SSRF_RESOLVER_FAIL_CLOSED=0`. Every fetch path — including
+`stealth_scrape` — runs the SSRF pre-check before any engine is contacted.
+Web-facing engines reach no in-stack peer directly (`NO_PROXY` carries only
+declared `direct_peers`, e.g. `gpt-researcher → searxng`); all other HTTP
+traverses Smokescreen. See `docs/robots-ua-decision.md` for the
+robots.txt/user-agent policy.
+
 ## 4. Fetch guard (plugin) + Workbench path
 
 `packages/opencode-plugin` (`tool.execute.before`) **blocks** raw

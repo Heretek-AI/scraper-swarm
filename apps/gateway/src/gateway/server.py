@@ -26,9 +26,10 @@ from panel_api.ssrf_guard import (
     audit_target_for_action,
     deny_reason_for_url,
     is_session_expired_fail_closed,
+    resolver_fail_closed,
     sanitize_details,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,57 @@ CRAWL4AI_URL = os.environ.get("CRAWL4AI_URL", "http://crawl4ai:11235")
 DB_PATH = os.environ.get("SWARM_DB_PATH", "/var/lib/scraper-swarm/panel.db")
 
 mcp_server = MCPServer(name="ScraperSwarmGateway")
+
+# Ticket #6 (gateway contract v1): input bounds and response caps.
+# - web_search limit is clamped to [WEB_SEARCH_LIMIT_MIN, WEB_SEARCH_LIMIT_MAX].
+# - Fetched/markdown result bytes are capped at MAX_FETCH_BYTES (default 3 MiB,
+#   override with SWARM_MAX_FETCH_BYTES); over-cap results are truncated and
+#   marked so automated clients can detect it. Documented in
+#   docs/opencode-integration.md §5.
+WEB_SEARCH_LIMIT_MIN = 1
+WEB_SEARCH_LIMIT_MAX = 20
+_DEFAULT_MAX_FETCH_BYTES = 3 * 1024 * 1024
+
+
+def _max_fetch_bytes() -> int:
+    try:
+        return max(1, int(os.environ.get("SWARM_MAX_FETCH_BYTES", str(_DEFAULT_MAX_FETCH_BYTES))))
+    except ValueError:
+        return _DEFAULT_MAX_FETCH_BYTES
+
+
+MAX_FETCH_BYTES = _max_fetch_bytes()
+
+
+def _cap_text(text: str, limit: int | None = None) -> str:
+    """Caps result text to *limit* bytes (default MAX_FETCH_BYTES), marking truncation."""
+    cap = MAX_FETCH_BYTES if limit is None else limit
+    raw = text.encode("utf-8", errors="ignore")
+    if len(raw) <= cap:
+        return text
+    cut = raw[:cap].decode("utf-8", errors="ignore")
+    return f"{cut}\n…[truncated: showing {cap} of {len(raw)} bytes]"
+
+
+def _clamp_limit(limit: object) -> int:
+    """Bounds a web_search limit to [WEB_SEARCH_LIMIT_MIN, WEB_SEARCH_LIMIT_MAX]."""
+    try:
+        value = int(limit)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        value = WEB_SEARCH_LIMIT_MIN
+    return max(WEB_SEARCH_LIMIT_MIN, min(value, WEB_SEARCH_LIMIT_MAX))
+
+
+async def _ssrf_precheck(url: str) -> str | None:
+    """Runs the SSRF pre-check off the event loop; resolver outage fails closed
+    by default (SWARM_SSRF_RESOLVER_FAIL_CLOSED opt-out)."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(deny_reason_for_url, url), timeout=8.0)
+    except Exception:
+        if resolver_fail_closed():
+            return "DNS resolution unavailable (fail-closed)"
+        return None
+
 
 # Phase 03: in-memory sliding-window rate limiter per agent-key id.
 # Window is 60s; each key's timestamps are pruned on check. This is a
@@ -431,7 +483,15 @@ async def web_search(query: str, limit: int = 5) -> str:
     Agent -> /mcp -> SearXNG -> Smokescreen -> Internet.
     Evidence: scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2,
     walkthrough.md::smoke-3-3, workbench_fix_walkthrough.md::mcp-proof.
+
+    Ticket #6: *limit* is clamped to [1, 20] so an automated client cannot
+    demand unbounded engine work per call.
     """
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = WEB_SEARCH_LIMIT_MIN
+    limit = max(WEB_SEARCH_LIMIT_MIN, min(limit, WEB_SEARCH_LIMIT_MAX))
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.get(
@@ -468,11 +528,14 @@ async def fetch_page(url: str) -> str:
     per-connection enforcement point for plain DNS names.
     Evidence: scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2,
     walkthrough.md::smoke-3-3, workbench_fix_walkthrough.md::mcp-proof.
+
+    Ticket #6: a resolver outage/timeout fails closed by default
+    (SWARM_SSRF_RESOLVER_FAIL_CLOSED opt-out) instead of delegating blindly.
     """
     try:
         denial = await asyncio.wait_for(asyncio.to_thread(deny_reason_for_url, url), timeout=8.0)
     except Exception:
-        denial = None  # Resolver unavailable/timed out: delegate to Smokescreen.
+        denial = "DNS resolution unavailable (fail-closed)" if resolver_fail_closed() else None
     if denial is not None:
         return f"SSRF denied (fail-closed): {denial}"
     async with httpx.AsyncClient(timeout=45.0) as client:
@@ -505,7 +568,7 @@ async def fetch_page(url: str) -> str:
 
 class SearchRequest(BaseModel):
     query: str
-    limit: int = 5
+    limit: int = Field(default=5, ge=WEB_SEARCH_LIMIT_MIN, le=WEB_SEARCH_LIMIT_MAX)
 
 
 class FetchRequest(BaseModel):
@@ -651,7 +714,7 @@ def create_gateway_app() -> FastAPI:
 
             if name == "web_search":
                 q = args.get("query", "")
-                limit = args.get("limit", 5)
+                limit = _clamp_limit(args.get("limit", 5))
                 await log_agent_activity(
                     agent["name"], "web_search", target=q, details={"limit": limit}
                 )
@@ -659,7 +722,7 @@ def create_gateway_app() -> FastAPI:
                 return {
                     "jsonrpc": "2.0",
                     "id": rpc_id,
-                    "result": {"content": [{"type": "text", "text": result}]},
+                    "result": {"content": [{"type": "text", "text": _cap_text(result)}]},
                 }
 
             elif name == "fetch_page":
@@ -680,12 +743,25 @@ def create_gateway_app() -> FastAPI:
                         )
                     raise
                 target_url = args.get("url", "")
+                # Ticket #6: handler-level pre-check (defense in depth; the
+                # tool function checks again before delegating to Crawl4AI).
+                denial = await _ssrf_precheck(target_url)
+                if denial is not None:
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": rpc_id,
+                        "result": {
+                            "content": [
+                                {"type": "text", "text": f"SSRF denied (fail-closed): {denial}"}
+                            ]
+                        },
+                    }
                 await log_agent_activity(agent["name"], "fetch_page", target=target_url)
                 result = await fetch_page(url=target_url)
                 return {
                     "jsonrpc": "2.0",
                     "id": rpc_id,
-                    "result": {"content": [{"type": "text", "text": result}]},
+                    "result": {"content": [{"type": "text", "text": _cap_text(result)}]},
                 }
 
             elif name == "deep_research":
@@ -718,7 +794,7 @@ def create_gateway_app() -> FastAPI:
                 return {
                     "jsonrpc": "2.0",
                     "id": rpc_id,
-                    "result": {"content": [{"type": "text", "text": result}]},
+                    "result": {"content": [{"type": "text", "text": _cap_text(result)}]},
                 }
 
             elif name == "stealth_scrape":
@@ -739,6 +815,21 @@ def create_gateway_app() -> FastAPI:
                         )
                     raise
                 target_url = args.get("url", "")
+                # Ticket #6: stealth_scrape previously skipped the SSRF
+                # pre-check entirely and went straight to Scrapling, letting an
+                # internal/peer URL bypass the egress proxy via NO_PROXY.
+                # Deny here (and the Scrapling path is never contacted).
+                denial = await _ssrf_precheck(target_url)
+                if denial is not None:
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": rpc_id,
+                        "result": {
+                            "content": [
+                                {"type": "text", "text": f"SSRF denied (fail-closed): {denial}"}
+                            ]
+                        },
+                    }
                 await log_agent_activity(agent["name"], "stealth_scrape", target=target_url)
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     try:
@@ -751,7 +842,7 @@ def create_gateway_app() -> FastAPI:
                 return {
                     "jsonrpc": "2.0",
                     "id": rpc_id,
-                    "result": {"content": [{"type": "text", "text": result}]},
+                    "result": {"content": [{"type": "text", "text": _cap_text(result)}]},
                 }
 
             else:
@@ -798,7 +889,7 @@ def create_gateway_app() -> FastAPI:
             agent["name"], "web_search", target=req.query, details={"limit": req.limit}
         )
         result = await web_search(query=req.query, limit=req.limit)
-        return {"query": req.query, "result": result}
+        return {"query": req.query, "result": _cap_text(result)}
 
     @app.post("/api/fetch")
     async def rest_fetch(
@@ -826,7 +917,7 @@ def create_gateway_app() -> FastAPI:
             raise
         await log_agent_activity(agent["name"], "fetch_page", target=req.url)
         result = await fetch_page(url=req.url)
-        return {"url": req.url, "result": result}
+        return {"url": req.url, "result": _cap_text(result)}
 
     return app
 

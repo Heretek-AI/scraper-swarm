@@ -82,7 +82,10 @@ def test_gateway_allows_names_resolving_to_global(monkeypatch):
 
 
 def test_gateway_defers_unresolvable_names_to_smokescreen(monkeypatch):
+    """Opt-out path: with SWARM_SSRF_RESOLVER_FAIL_CLOSED=0, unresolvable names
+    still delegate to Smokescreen (default since #6 is fail-closed)."""
     monkeypatch.setattr(ssrf_guard, "resolve_host", lambda host, timeout=3.0: [])
+    monkeypatch.setenv("SWARM_SSRF_RESOLVER_FAIL_CLOSED", "0")
     assert deny_reason_for_url("http://example.com/") is None
 
 
@@ -161,3 +164,49 @@ def test_audit_scrubs_bearer_and_token_query_preserves_forensics():
     assert "example.com" in str(d["url"])
     d = sanitize_details({"q": "normal forensic text"})
     assert d["q"] == "normal forensic text"
+
+
+# ---- Ticket #6 (gateway contract v1): fail-closed resolver, URL length bound ----
+
+
+def test_gateway_unresolvable_fails_closed_by_default(monkeypatch):
+    """#6: unresolvable names are denied by default (fail-closed for automated keys)."""
+    monkeypatch.setattr(ssrf_guard, "resolve_host", lambda host, timeout=3.0: [])
+    monkeypatch.delenv("SWARM_SSRF_RESOLVER_FAIL_CLOSED", raising=False)
+    assert deny_reason_for_url("http://nonexistent-peer.invalid/") is not None
+
+
+def test_gateway_unresolvable_opt_out_delegates_to_smokescreen(monkeypatch):
+    """#6: operators can opt back into delegation via env (documented choice)."""
+    monkeypatch.setattr(ssrf_guard, "resolve_host", lambda host, timeout=3.0: [])
+    monkeypatch.setenv("SWARM_SSRF_RESOLVER_FAIL_CLOSED", "0")
+    assert deny_reason_for_url("http://example.com/") is None
+
+
+def test_gateway_resolver_exception_fails_closed_by_default(monkeypatch):
+    """#6: a raising resolver fails closed by default."""
+
+    def _boom(_host, timeout=3.0):
+        raise TimeoutError("dns timed out")
+
+    monkeypatch.setattr(ssrf_guard, "resolve_host", _boom)
+    monkeypatch.delenv("SWARM_SSRF_RESOLVER_FAIL_CLOSED", raising=False)
+    assert deny_reason_for_url("http://example.com/") is not None
+
+
+def test_gateway_url_over_length_bound_denied(monkeypatch):
+    """#6: URLs longer than 2048 chars are denied without DNS."""
+    monkeypatch.setattr(ssrf_guard, "resolve_host", lambda host, timeout=3.0: ["93.184.216.34"])
+    long_url = "http://example.com/" + "a" * 2048
+    assert len(long_url) > 2048
+    assert deny_reason_for_url(long_url) is not None
+    ok_url = "http://example.com/" + "a" * 100
+    assert deny_reason_for_url(ok_url) is None
+
+
+def test_gateway_url_with_control_chars_denied():
+    """#6 adversarial: tab/newline tricks (WHATWG strips them, urlsplit does
+    not) must not smuggle a loopback host past the parser."""
+    assert deny_reason_for_url("http://127.0.0.1\t@example.com/") is not None
+    assert deny_reason_for_url("http://127.0.0.1\n@example.com/") is not None
+    assert deny_reason_for_url("http://example.com/\r\nX: 1") is not None

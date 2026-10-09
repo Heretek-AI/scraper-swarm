@@ -17,6 +17,9 @@ secrets: [OPENAI_API_KEY, ANTHROPIC_API_KEY, TAVILY_API_KEY]
 env:
   RETRIEVER: "searx"
   SEARX_URL: "http://searxng:8080"
+# Ticket #6: the retriever calls searxng over plain HTTP, so that one peer
+# stays direct; everything else traverses the egress proxy.
+direct_peers: [searxng]
 native_exposable: true
 params_schema:
   type: object
