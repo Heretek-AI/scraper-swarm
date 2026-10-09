@@ -33,6 +33,12 @@ jobs:
       - name: Run Python unit & integration tests
         run: uv run pytest apps/ -v --tb=short
 
+      - name: Lint (ruff)
+        run: uv run ruff check apps/ tests/
+
+      - name: Type check (mypy)
+        run: uv run mypy apps/gateway/src apps/panel-api/src apps/swarmd/src --ignore-missing-imports
+
   frontend-and-plugin-test:
     name: Frontend Build & Plugin Tests
     runs-on: ubuntu-latest

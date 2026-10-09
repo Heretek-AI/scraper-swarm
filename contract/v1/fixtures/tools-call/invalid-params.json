@@ -1,0 +1,27 @@
+{
+  "contract_version": 1,
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "arguments": {
+        "limit": 3
+      },
+      "name": "web_search"
+    }
+  },
+  "response_body": {
+    "error": {
+      "code": -32602,
+      "message": "Invalid params: query: Field required"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  },
+  "response_headers": {
+    "content-type": "application/json",
+    "x-swarm-contract": "1"
+  },
+  "response_status": 200
+}

@@ -77,7 +77,7 @@ def _cap_text(text: str, limit: int | None = None) -> str:
 def _clamp_limit(limit: object) -> int:
     """Bounds a web_search limit to [WEB_SEARCH_LIMIT_MIN, WEB_SEARCH_LIMIT_MAX]."""
     try:
-        value = int(limit)  # type: ignore[arg-type]
+        value = int(limit) if isinstance(limit, (str, int, float)) else WEB_SEARCH_LIMIT_MIN
     except (TypeError, ValueError):
         value = WEB_SEARCH_LIMIT_MIN
     return max(WEB_SEARCH_LIMIT_MIN, min(value, WEB_SEARCH_LIMIT_MAX))

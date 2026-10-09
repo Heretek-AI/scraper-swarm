@@ -1,0 +1,36 @@
+{
+  "contract_version": 1,
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "arguments": {
+        "url": "https://example.com/"
+      },
+      "name": "fetch_page"
+    }
+  },
+  "response_body": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "content": [
+        {
+          "text": "Crawl4AI fetch timed out: too slow",
+          "type": "text"
+        }
+      ],
+      "isError": true,
+      "structuredContent": {
+        "code": "upstream_timeout",
+        "message": "Crawl4AI fetch timed out: too slow"
+      }
+    }
+  },
+  "response_headers": {
+    "content-type": "application/json",
+    "x-swarm-contract": "1"
+  },
+  "response_status": 200
+}

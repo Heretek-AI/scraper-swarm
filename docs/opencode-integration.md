@@ -199,6 +199,11 @@ are replaced with `<engine>`); SSRF reasons echo only the normalized host
 from the client's own URL. Seal-and-cite clients should verify
 `content_sha256` against `content` before citing.
 
+Consumers that don't run this stack: versioned golden fixtures live in
+`contract/v1/fixtures/` (vendoring + regeneration: `contract/v1/README.md`).
+The replay suite (`apps/gateway/tests/engine_fixtures/`, manifest + record
+mode) pins the real tool functions against stable engine payloads.
+
 ## 4. Fetch guard (plugin) + Workbench path
 
 `packages/opencode-plugin` (`tool.execute.before`) **blocks** raw

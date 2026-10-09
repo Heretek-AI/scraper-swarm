@@ -336,7 +336,8 @@ def resolve_host(host: str, timeout: float = 3.0) -> list[str]:
     try:
         socket.setdefaulttimeout(timeout)
         infos = socket.getaddrinfo(host, None, family=socket.AF_UNSPEC)
-        return sorted({info[4][0] for info in infos})
+        addrs: set[str] = {str(info[4][0]) for info in infos}
+        return sorted(addrs)
     except Exception:
         return []
     finally:

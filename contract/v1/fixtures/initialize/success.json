@@ -1,0 +1,28 @@
+{
+  "contract_version": 1,
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "initialize"
+  },
+  "response_body": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "capabilities": {
+        "tools": {}
+      },
+      "protocolVersion": "2025-06-18",
+      "serverInfo": {
+        "contractVersion": 1,
+        "name": "ScraperSwarmGateway",
+        "version": "0.1.0"
+      }
+    }
+  },
+  "response_headers": {
+    "content-type": "application/json",
+    "x-swarm-contract": "1"
+  },
+  "response_status": 200
+}

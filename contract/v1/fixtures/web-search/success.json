@@ -1,0 +1,53 @@
+{
+  "contract_version": 1,
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "arguments": {
+        "limit": 2,
+        "query": "recorded query"
+      },
+      "name": "web_search"
+    }
+  },
+  "response_body": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "content": [
+        {
+          "text": "Title: Recorded One\nURL: https://example.com/recorded-1\nSnippet: Recorded snippet one.\n---\nTitle: Recorded Two\nURL: https://example.com/recorded-2\nSnippet: Recorded snippet two.\n---",
+          "type": "text"
+        }
+      ],
+      "structuredContent": {
+        "engine": "searxng",
+        "fetched_at": "<fetched_at>",
+        "query": "recorded query",
+        "results": [
+          {
+            "engine": "searxng",
+            "rank": 1,
+            "snippet": "Recorded snippet one.",
+            "title": "Recorded One",
+            "url": "https://example.com/recorded-1"
+          },
+          {
+            "engine": "searxng",
+            "rank": 2,
+            "snippet": "Recorded snippet two.",
+            "title": "Recorded Two",
+            "url": "https://example.com/recorded-2"
+          }
+        ]
+      }
+    }
+  },
+  "response_headers": {
+    "content-type": "application/json",
+    "x-swarm-contract": "1"
+  },
+  "response_status": 200
+}
