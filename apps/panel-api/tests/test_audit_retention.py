@@ -152,7 +152,7 @@ async def test_double_prune_keeps_chain_verifiable(db):
         old_ids = [r["id"] for r in await cur.fetchall()]
     assert len(old_ids) == 2
     await db.conn.execute(
-        f"UPDATE audit_log SET timestamp = '2000-01-01T00:00:00+00:00' WHERE id IN ({','.join('?' * len(old_ids))})",
+        "UPDATE audit_log SET timestamp = '2000-01-01T00:00:00+00:00' WHERE id IN (?, ?)",
         tuple(old_ids),
     )
     await db.conn.commit()
