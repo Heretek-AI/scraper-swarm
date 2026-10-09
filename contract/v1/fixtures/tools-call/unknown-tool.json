@@ -1,0 +1,25 @@
+{
+  "contract_version": 1,
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "arguments": {},
+      "name": "nope_tool"
+    }
+  },
+  "response_body": {
+    "error": {
+      "code": -32601,
+      "message": "Method nope_tool not found"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  },
+  "response_headers": {
+    "content-type": "application/json",
+    "x-swarm-contract": "1"
+  },
+  "response_status": 200
+}

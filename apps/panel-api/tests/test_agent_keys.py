@@ -321,3 +321,38 @@ async def test_panel_session_null_empty_naive_fail_closed(authed_client):
     client.cookies.set("swarm_session", "sess-valid")
     r = await client.get("/auth/me")
     assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_create_key_audit_mode_option(authed_client):
+    """Ticket #10: per-key audit mode stored, listed, validated."""
+    client, _ = authed_client
+    r = await client.post(
+        "/agents/keys",
+        json={"name": "priv-svc", "scopes": ["search"], "audit_query_mode": "hashed"},
+    )
+    assert r.status_code == 200
+    assert r.json()["audit_query_mode"] == "hashed"
+    r = await client.get("/agents/keys")
+    modes = {k["name"]: k["audit_query_mode"] for k in r.json()}
+    assert modes["priv-svc"] == "hashed"
+    r = await client.post(
+        "/agents/keys",
+        json={"name": "priv-bad", "scopes": ["search"], "audit_query_mode": "bogus"},
+    )
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_security_privacy_endpoint(authed_client, monkeypatch):
+    """Ticket #10: operator-visible privacy posture."""
+    client, _ = authed_client
+    monkeypatch.setenv("SWARM_AUDIT_QUERY_MODE", "redacted")
+    monkeypatch.setenv("SWARM_AUDIT_RETENTION_DAYS", "90")
+    monkeypatch.delenv("SWARM_AUDIT_HMAC_SALT", raising=False)
+    r = await client.get("/security/audit/privacy")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["query_mode_default"] == "redacted"
+    assert body["retention_days"] == 90
+    assert body["hmac_salt_configured"] is False

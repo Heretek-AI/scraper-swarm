@@ -58,24 +58,97 @@ class AuditLogger:
         return entry_hash
 
     async def verify_chain(self) -> bool:
-        """Verifies the cryptographic integrity of the entire audit chain."""
+        """Verifies the cryptographic integrity of the entire audit chain.
+
+        Ticket #10: retention pruning deletes old rows and appends an
+        ``audit_checkpoint`` row recording the deleted head hash. The walk
+        starts at the latest checkpoint's head (instead of GENESIS) and
+        checkpoint rows are hash-checked but exempt from the prev-link check
+        (their prev predates the pruned prefix by design). A leading gap with
+        no covering checkpoint still fails.
+        """
         query = (
             "SELECT actor, action, target, details, prev_hash, entry_hash "
             "FROM audit_log ORDER BY id ASC"
         )
         async with self.db.execute(query) as cursor:
-            expected_prev = "GENESIS"
-            async for row in cursor:
-                if row["prev_hash"] != expected_prev:
-                    return False
-                h = hashlib.sha256()
-                h.update(expected_prev.encode("utf-8"))
-                h.update(row["actor"].encode("utf-8"))
-                h.update(row["action"].encode("utf-8"))
-                if row["target"]:
-                    h.update(row["target"].encode("utf-8"))
-                h.update(row["details"].encode("utf-8"))
-                if h.hexdigest() != row["entry_hash"]:
-                    return False
-                expected_prev = row["entry_hash"]
+            rows = list(await cursor.fetchall())
+        head_hash = "GENESIS"
+        for row in reversed(rows):
+            if row["action"] == "audit_checkpoint":
+                try:
+                    head_hash = json.loads(row["details"]).get("head_hash") or "GENESIS"
+                except Exception:
+                    head_hash = "GENESIS"
+                break
+        expected_prev = head_hash
+        for row in rows:
+            if row["action"] != "audit_checkpoint" and row["prev_hash"] != expected_prev:
+                return False
+            h = hashlib.sha256()
+            h.update(row["prev_hash"].encode("utf-8"))
+            h.update(row["actor"].encode("utf-8"))
+            h.update(row["action"].encode("utf-8"))
+            if row["target"]:
+                h.update(row["target"].encode("utf-8"))
+            h.update(row["details"].encode("utf-8"))
+            if h.hexdigest() != row["entry_hash"]:
+                return False
+            expected_prev = row["entry_hash"]
         return True
+
+    async def prune_older_than(self, cutoff_iso: str) -> int:
+        """Deletes audit rows older than *cutoff_iso*, keeping the chain
+        verifiable via a checkpoint row (ticket #10).
+
+        The horizon is the newest row older than the cutoff; every
+        non-checkpoint row up to and including it is deleted (a contiguous
+        id prefix — timestamps are monotonic in practice). Checkpoint rows
+        at or below the horizon are collapsed into the new unified
+        checkpoint (they cover a prefix now subsumed by it); checkpoints
+        above the horizon are retained. Returns the deleted non-checkpoint
+        count (0 writes no checkpoint).
+        """
+        async with self.db.execute(
+            "SELECT MAX(id) AS horizon FROM audit_log"
+            " WHERE timestamp < ? AND action != 'audit_checkpoint'",
+            (cutoff_iso,),
+        ) as cur:
+            horizon_row = await cur.fetchone()
+        horizon = horizon_row["horizon"] if horizon_row else None
+        if horizon is None:
+            return 0
+        async with self.db.execute(
+            "SELECT entry_hash FROM audit_log WHERE id = ?", (horizon,)
+        ) as cur:
+            head = await cur.fetchone()
+        head_hash = head["entry_hash"] if head else "GENESIS"
+        async with self.db.execute(
+            "SELECT COUNT(*) AS n FROM audit_log WHERE id <= ? AND action != 'audit_checkpoint'",
+            (horizon,),
+        ) as cur:
+            count_row = await cur.fetchone()
+            count = count_row["n"] if count_row else 0
+        await self.db.execute(
+            "DELETE FROM audit_log WHERE id <= ? AND action != 'audit_checkpoint'",
+            (horizon,),
+        )
+        # Collapse prior checkpoints covered by the new unified checkpoint:
+        # an earlier checkpoint at/below the horizon would otherwise leave
+        # rows after it unlinked to the newest checkpoint head (double-prune
+        # chain breakage). Checkpoints above the horizon are retained.
+        await self.db.execute(
+            "DELETE FROM audit_log WHERE id <= ? AND action = 'audit_checkpoint'",
+            (horizon,),
+        )
+        await self.db.commit()
+        await self.log(
+            actor="system",
+            action="audit_checkpoint",
+            details={
+                "pruned_through_id": horizon,
+                "head_hash": head_hash,
+                "cutoff": cutoff_iso,
+            },
+        )
+        return count

@@ -1,0 +1,41 @@
+name: SSRF egress container check
+
+# Ticket #6 (gateway contract v1): the Docker-based Smokescreen test
+# (tests/security/test_ssrf.py) cannot run in the default CI job matrix, so
+# it runs here — weekly plus on demand. If this workflow is ever removed,
+# document why in docs/DEPLOYMENT.md (egress section).
+
+on:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ssrf-container:
+    name: Smokescreen container SSRF test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build egress-web image
+        run: docker build -t scraper-swarm/egress-web:local deploy/egress
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Run SSRF container tests
+        run: uv run pytest tests/security/test_ssrf.py -v --tb=short

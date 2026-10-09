@@ -30,6 +30,43 @@ curl -s -b "swarm_session=$SESSION" -X POST https://<panel>/agents/keys \
   -d '{"name":"opencode-coder-1","scopes":["search","scrape"],"expires_in_hours":720}'
 ```
 
+### Service-account keys for automation (ticket #7)
+
+Human TOTP sessions are for operators; automated clients get keys from the
+host via `swarmctl` (host shell access is the authorization, consistent with
+the bootstrap model — there is no network path to minting):
+
+```bash
+docker compose exec panel-api swarmctl keys create \
+  --name research-svc --scopes search,scrape --expires 90d
+docker compose exec panel-api swarmctl keys rotate research-svc --grace 24h
+docker compose exec panel-api swarmctl keys list
+```
+
+`create` prints the raw key **once** (only the hash is stored). `rotate`
+renames the old row (valid until `--grace` elapses) and mints a same-named
+successor with the same scopes — zero-downtime rotation. Key creation works
+without `allow_placeholder_host` once `SWARM_PUBLIC_MCP_URL` is configured
+(compose passes it through; see `.env.example`). Every successful gateway
+call refreshes `last_used_at` (throttled to one write per key per minute;
+visible in `GET /agents/keys` and `swarmctl keys list`).
+
+Per-key audit query privacy (ticket #10): `--audit-mode
+verbatim|hashed|redacted` (API: `audit_query_mode`, default inherits the
+`SWARM_AUDIT_QUERY_MODE` global, default `verbatim`). `hashed` stores a
+salted HMAC (`SWARM_AUDIT_HMAC_SALT`, server-held — required for correlation;
+missing salt falls back to `redacted`), `redacted` stores length and
+category only. The hash chain covers the stored form, so it verifies in
+every mode. See `GET /security/audit/privacy` for the posture.
+
+### Readiness
+
+`GET /ready` (routed through Caddy, like `/health`) reports
+`{ready, db, engines: {searxng, crawl4ai, scrapling, gpt-researcher}}` with
+per-engine `{ok, ms, status}` — `ready` is true only when the DB answers and
+every engine is reachable. `tools/list` filtering (#4) consumes the same
+engine set via `SWARM_DEPLOYED_ENGINES` until it is wired to `/ready`.
+
 ## 2. Load `opencode.json` in OpenCode v2
 
 Paste the returned snippet into `opencode.json`, replacing `url` with this
@@ -86,6 +123,95 @@ Expected status codes:
 Multi-replica deployments needing a shared budget should move the bucket to
 Valkey; the gateway helper (`_check_rate_limit`) is the seam.
 
+JSON-RPC 2.0 conformance (ticket #4): malformed JSON returns `-32700`;
+a missing/non-`"2.0"` envelope or non-string method returns `-32600`;
+unknown methods *and* unknown tools return `-32601`; invalid tool arguments
+return `-32602` with a per-field message. Requests without an `id` are
+notifications: `HTTP 202` with no body. The `id` (string or number) is
+echoed exactly. `initialize` negotiates: a supported client
+`protocolVersion` (`2024-11-05`, `2025-03-26`, `2025-06-18`) is echoed,
+otherwise the server answers its latest; `serverInfo.version` is the single
+gateway package version. `tools/list` shows only tools whose scope the key
+holds *and* whose engine is deployed (`SWARM_DEPLOYED_ENGINES` override;
+`/ready` in #7 becomes the truth source), with `inputSchema` generated from
+the same Pydantic models that validate `tools/call` arguments. Every call —
+including `initialize`/`tools/list` — is authenticated and costs one
+rate-limit hit (uniform-cost decision: simpler accounting, and the `429`
+contract is unchanged).
+
+Request/response bounds (ticket #6): `web_search` `limit` is clamped to
+`1–20` (REST `POST /api/search` validates `422` outside that range); URLs
+over `2048` characters are SSRF-denied without DNS; fetched result text is
+capped at `SWARM_MAX_FETCH_BYTES` (default 3 MiB) with a
+`…[truncated: showing X of Y bytes]` marker. Unresolvable hostnames and
+resolver outages fail closed (`SSRF denied`) by default; operators may opt
+back into Smokescreen-only delegation with
+`SWARM_SSRF_RESOLVER_FAIL_CLOSED=0`. Every fetch path — including
+`stealth_scrape` — runs the SSRF pre-check before any engine is contacted.
+Web-facing engines reach no in-stack peer directly (`NO_PROXY` carries only
+declared `direct_peers`, e.g. `gpt-researcher → searxng`); all other HTTP
+traverses Smokescreen. See `docs/robots-ua-decision.md` for the
+robots.txt/user-agent policy.
+
+## 3b. Contract v1 reference (ticket #5)
+
+Every `/mcp` response carries `X-Swarm-Contract: 1`, and `initialize`
+reports `serverInfo.contractVersion: 1`. **Bump rules:** additive changes
+(new optional fields, new tools, new codes) keep v1; any breaking change
+(removing/renaming fields, changing semantics, new required params) goes to
+v2 with a new header value — and the consumer (Heretek-AI/IUMBTEMS#107) is
+told in advance.
+
+`web_search` and `fetch_page` return **structured results** alongside the
+legacy text block (kept for older clients — always read `structuredContent`
+when present):
+
+```json
+{
+  "result": {
+    "content": [{"type": "text", "text": "Title: …\nURL: …\nSnippet: …\n---"}],
+    "structuredContent": {
+      "query": "latest rust web frameworks",
+      "results": [{"rank": 1, "title": "…", "url": "https://…", "snippet": "…", "engine": "searxng"}],
+      "engine": "searxng",
+      "fetched_at": "2026-10-09T00:00:00+00:00"
+    }
+  }
+}
+```
+
+`fetch_page.structuredContent`: `requested_url`, `final_url`, `status_code`,
+`content_type`, `title?`, `fetched_at`, `format` (`markdown`|`html`|`text`),
+`content`, `content_sha256` (SHA-256 over exactly the returned `content`
+bytes, UTF-8), `bytes`, `truncated`, `engine: "crawl4ai"`. Both tools publish
+`outputSchema` in `tools/list`, generated from the same models that build
+the payloads. `deep_research`/`stealth_scrape` stay text-only on success
+(their engine APIs are unverified) but use the error envelope below.
+
+**Errors** set `isError: true` with `structuredContent: {code, message,
+retry_after_s?}`:
+
+| Code | Used for |
+| --- | --- |
+| `invalid_params` | bad arguments (transport: JSON-RPC `-32602`) |
+| `ssrf_denied` | the SSRF pre-check refused the URL |
+| `blocked_by_policy` | reserved for future policy refusals (e.g. robots enforcement) |
+| `upstream_error` | an engine failed |
+| `upstream_timeout` | an engine timed out |
+| `rate_limited` | over the key's rate (transport: HTTP `429` + `Retry-After` header) |
+| `scope_denied` | the key lacks the scope (transport: HTTP `403`) |
+| `engine_unavailable` | the engine isn't deployed or healthy |
+
+Error messages never include internal hostnames or ports (engine base URLs
+are replaced with `<engine>`); SSRF reasons echo only the normalized host
+from the client's own URL. Seal-and-cite clients should verify
+`content_sha256` against `content` before citing.
+
+Consumers that don't run this stack: versioned golden fixtures live in
+`contract/v1/fixtures/` (vendoring + regeneration: `contract/v1/README.md`).
+The replay suite (`apps/gateway/tests/engine_fixtures/`, manifest + record
+mode) pins the real tool functions against stable engine payloads.
+
 ## 4. Fetch guard (plugin) + Workbench path
 
 `packages/opencode-plugin` (`tool.execute.before`) **blocks** raw
@@ -132,3 +258,12 @@ whitespace/missing/unparseable/naive-past → `401`); legacy DBs missing
 expired) so they never `500`. Audit scrub (`scrub_secrets_from_text`) redacts
 `swarm_sec_*`, `Bearer` tokens, `token=`/`secret=` KV, and embedded-URL
 query/fragments while preserving non-secret query forensics.
+
+Query privacy and retention (ticket #10): audit targets are stored per the
+key's `audit_query_mode` (`verbatim` today, `hashed` salted-HMAC, or
+`redacted` length-plus-category; unknown values fail closed to `redacted`).
+`swarmctl audit prune --retention-days N` (default from
+`SWARM_AUDIT_RETENTION_DAYS`) deletes rows older than the retention window
+and appends an `audit_checkpoint` row recording the deleted head hash, so
+`POST /security/audit/verify` still passes. Checkpoint rows are never
+pruned. Retention `0`/unset disables pruning.

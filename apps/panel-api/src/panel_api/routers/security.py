@@ -150,3 +150,30 @@ async def verify_audit_chain(
         cnt = row["cnt"] if row else 0
 
     return {"valid": valid, "entries_checked": cnt}
+
+
+class AuditPrivacyResponse(BaseModel):
+    query_mode_default: str
+    hmac_salt_configured: bool
+    retention_days: float | None
+
+
+@router.get("/audit/privacy", response_model=AuditPrivacyResponse)
+async def get_audit_privacy(
+    db: Database = Depends(get_db),
+    user: SessionInfo = Depends(require_role("admin", "operator", "viewer")),
+):
+    """Ticket #10: operator-visible audit privacy posture (per-key modes live
+    on the keys themselves; see GET /agents/keys)."""
+    from panel_api.ssrf_guard import global_audit_query_mode
+
+    raw_retention = os.environ.get("SWARM_AUDIT_RETENTION_DAYS", "").strip()
+    try:
+        retention_days = float(raw_retention) if raw_retention else None
+    except ValueError:
+        retention_days = None
+    return AuditPrivacyResponse(
+        query_mode_default=global_audit_query_mode(),
+        hmac_salt_configured=bool(os.environ.get("SWARM_AUDIT_HMAC_SALT", "")),
+        retention_days=retention_days,
+    )

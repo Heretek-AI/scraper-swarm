@@ -68,14 +68,19 @@ def render_service(
         if param in sel.params:
             env[env_name] = str(sel.params[param])
     if "egress-web" in entry.networks and entry.id != PROXY_SERVICE:
-        # P1-live-smoke NO_PROXY fix (walkthrough.md::smoke-3-3): loopback must
-        # NOT bypass Smokescreen, otherwise fetch_page(http://127.0.0.1/...)
-        # skips the egress proxy entirely. In-stack peers stay direct (Redis
-        # RESP and other non-HTTP peer traffic cannot traverse an HTTP proxy;
-        # CRAWL4AI_ALLOW_INTERNAL_URLS delegation then covers only legitimate
-        # peer DNS while the gateway pre-deny + Smokescreen stop loopback,
-        # metadata, RFC1918/CGNAT, and encoded literals).
-        no_proxy = ",".join(sorted(peers))
+        # Ticket #6 (gateway contract v1): NO_PROXY carries ONLY this
+        # service's declared direct_peers (default: none). Previously every
+        # in-stack peer bypassed Smokescreen, so a URL like
+        # http://valkey:6379 sent to a web-facing engine skipped the proxy:
+        # an internal SSRF (stealth_scrape had no pre-check at all). Now all
+        # HTTP destinations traverse the egress proxy, where Smokescreen
+        # denies non-routable ranges; direct entries exist only for genuine
+        # needs (e.g. gpt-researcher -> searxng retriever). Non-HTTP peer
+        # traffic (Redis RESP) never consults proxy env vars, so removing
+        # valkey changes nothing for searxng's Redis use.
+        no_proxy = ",".join(
+            sorted({p for p in entry.direct_peers if p in peers and p != PROXY_SERVICE})
+        )
         for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
             env[key] = PROXY_URL
         env["NO_PROXY"] = env["no_proxy"] = no_proxy

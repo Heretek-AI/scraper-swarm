@@ -22,7 +22,10 @@ Security notes:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import ipaddress
+import os
 import re
 import socket
 from urllib.parse import urlsplit
@@ -31,9 +34,72 @@ from urllib.parse import urlsplit
 # no-secrets-in-logs/audit invariant.
 _SENSITIVE_KEY_PARTS = ("token", "secret", "password", "authorization", "bearer", "cookie")
 
+# Ticket #6 (gateway contract v1): input bounds and fail-closed resolver default.
+#
+# - URLs longer than MAX_URL_LENGTH are denied without DNS (fail-closed).
+# - Unresolvable names / resolver exceptions fail closed by default so an
+#   automated client cannot slip internal targets past the first layer.
+#   Operators may opt back into delegation to Smokescreen (the second layer,
+#   which denies unresolvable hosts at connection time) with
+#   SWARM_SSRF_RESOLVER_FAIL_CLOSED=0. The opt-out is deliberate and logged.
+MAX_URL_LENGTH = 2048
+
+
+def resolver_fail_closed() -> bool:
+    """True unless the operator explicitly opts into fail-open delegation."""
+    raw = os.environ.get("SWARM_SSRF_RESOLVER_FAIL_CLOSED", "").strip().lower()
+    return raw not in ("0", "false", "no", "off", "open")
+
+
 # Phase 03 retry1 QA-B: search/research actions carry free-text queries, not
 # URLs. Redacting them as URLs destroys forensics ("(invalid-url)").
 _SEARCH_QUERY_ACTIONS = frozenset({"web_search", "deep_research"})
+
+
+# Ticket #10 (gateway contract v1): audit query privacy modes. `verbatim`
+# stores the scrubbed target as today; `hashed` stores a salted HMAC (equal
+# queries correlate without being revealed); `redacted` stores only length
+# and category. The hash chain always covers the STORED form, so it verifies
+# in every mode.
+AUDIT_QUERY_MODES = frozenset({"verbatim", "hashed", "redacted"})
+
+
+def global_audit_query_mode() -> str:
+    """The SWARM_AUDIT_QUERY_MODE default (verbatim unless configured)."""
+    raw = os.environ.get("SWARM_AUDIT_QUERY_MODE", "verbatim").strip().lower()
+    return raw if raw in AUDIT_QUERY_MODES else "verbatim"
+
+
+def _redacted_query_form(action: str, target: str) -> str:
+    if action in _SEARCH_QUERY_ACTIONS:
+        kind = "query"
+    elif "://" in target:
+        kind = "url"
+    else:
+        kind = "other"
+    return f"redacted:{kind}:len={len(target)}"
+
+
+def apply_audit_query_mode(mode: str, action: str, target: str | None) -> str | None:
+    """Maps a scrubbed audit target to its stored form for *mode*.
+
+    Unknown modes fail closed to redacted (least disclosure). Hashed mode
+    without SWARM_AUDIT_HMAC_SALT configured also falls back to redacted so
+    a missing salt can never silently downgrade to verbatim.
+    """
+    if target is None or mode == "verbatim":
+        return target
+    if mode == "hashed":
+        salt = os.environ.get("SWARM_AUDIT_HMAC_SALT", "")
+        if salt:
+            digest = hmac.new(
+                salt.encode(),
+                f"{action}\x00{target}".encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            return f"hmac-sha256:{digest}"
+        return _redacted_query_form(action, target)
+    return _redacted_query_form(action, target)
 
 
 def is_expiry_passed(expires_at: str | None) -> bool:
@@ -318,23 +384,48 @@ def resolve_host(host: str, timeout: float = 3.0) -> list[str]:
     try:
         socket.setdefaulttimeout(timeout)
         infos = socket.getaddrinfo(host, None, family=socket.AF_UNSPEC)
-        return sorted({info[4][0] for info in infos})
+        addrs: set[str] = {str(info[4][0]) for info in infos}
+        return sorted(addrs)
     except Exception:
         return []
     finally:
         socket.setdefaulttimeout(None)
 
 
-def deny_reason_for_url(url: str, timeout: float = 3.0) -> str | None:
+def deny_reason_for_url(
+    url: str, timeout: float = 3.0, fail_closed_on_unresolvable: bool | None = None
+) -> str | None:
     """Fail-closed gateway pre-check; returns a denial reason or ``None`` to allow.
 
-    Denies non-http(s) schemes, empty hosts, every non-globally-routable IP
-    literal (loopback, RFC1918, CGNAT 100.64/10, link-local/metadata
-    169.254/16, multicast, reserved, unspecified -- in decimal, octal, hex,
-    dword, or shortened encodings), ``localhost``, and DNS names that resolve
-    exclusively to non-global addresses. Unresolvable names return ``None`` so
-    Smokescreen decides at connection time (it denies unresolvable hosts).
+    Denies non-http(s) schemes, empty hosts, over-long URLs, every
+    non-globally-routable IP literal (loopback, RFC1918, CGNAT 100.64/10,
+    link-local/metadata 169.254/16, multicast, reserved, unspecified -- in
+    decimal, octal, hex, dword, or shortened encodings), ``localhost``, and
+    DNS names that resolve exclusively to non-global addresses.
+
+    Unresolvable names and resolver exceptions fail closed by default
+    (``SWARM_SSRF_RESOLVER_FAIL_CLOSED``, see :func:`resolver_fail_closed`);
+    pass ``fail_closed_on_unresolvable=False`` (or set the env opt-out) to
+    delegate those to Smokescreen, which denies unresolvable hosts at
+    connection time.
     """
+    if len(url) > MAX_URL_LENGTH:
+        return f"URL longer than {MAX_URL_LENGTH} characters (fail-closed)"
+    # WHATWG URL parsers strip ASCII tabs/newlines before parsing while
+    # urlsplit does not — a tab can smuggle a loopback host past the parser
+    # (e.g. http://127.0.0.1\t@example.com/). WHATWG browsers also treat
+    # backslash as a path delimiter while urlsplit treats it as userinfo
+    # (e.g. http://169.254.169.254\@example.com/ connects to 169.254.169.254
+    # per browser but urlsplit sees host example.com). Deny control
+    # characters and backslash outright so parser differentials cannot
+    # bypass the pre-check.
+    if any(ord(c) < 32 or ord(c) == 127 or c == "\\" for c in url):
+        return "URL contains forbidden characters (fail-closed)"
+    fail_closed = (
+        resolver_fail_closed()
+        if fail_closed_on_unresolvable is None
+        else fail_closed_on_unresolvable
+    )
     try:
         parts = urlsplit(url)
     except Exception:
@@ -353,10 +444,19 @@ def deny_reason_for_url(url: str, timeout: float = 3.0) -> str | None:
             return f"host '{literal.compressed}' is not globally routable (fail-closed)"
         return None
 
-    resolved = resolve_host(host, timeout=timeout)
+    try:
+        resolved = resolve_host(host, timeout=timeout)
+    except Exception:
+        # Resolver unavailable/timed out: fail closed by default so an
+        # automated client cannot slip targets past the first layer.
+        if fail_closed:
+            return f"host '{host}' DNS resolution failed (fail-closed)"
+        return None
     if not resolved:
-        # Cannot resolve here: delegate to Smokescreen, which denies
-        # unresolvable hosts at connection time.
+        # Cannot resolve here: fail closed by default; Smokescreen remains
+        # the per-connection enforcement point when the operator opts out.
+        if fail_closed:
+            return f"host '{host}' unresolvable (fail-closed)"
         return None
     parsed = []
     for candidate in resolved:
@@ -364,6 +464,6 @@ def deny_reason_for_url(url: str, timeout: float = 3.0) -> str | None:
             parsed.append(ipaddress.ip_address(candidate))
         except ValueError:
             continue
-    if parsed and all(not addr.is_global for addr in parsed):
-        return f"host '{host}' resolves only to non-routable addresses (fail-closed)"
+    if parsed and any(not addr.is_global for addr in parsed):
+        return f"host '{host}' resolves to non-routable addresses (fail-closed)"
     return None

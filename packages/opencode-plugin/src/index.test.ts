@@ -18,7 +18,7 @@ describe("ScraperSwarmPlugin", () => {
 
     await expect(
       guard({ tool: "fetch" }, { args: { url: "https://example.com" } })
-    ).rejects.toThrowError(/Use the swarm_fetch \/ scraper-swarm MCP tool/);
+    ).rejects.toThrowError(/Use the scraper-swarm MCP tools/);
   });
 
   it("allows other non-fetch tools to proceed unhindered", async () => {
@@ -46,10 +46,10 @@ describe("ScraperSwarmPlugin", () => {
     const guard = plugin["tool.execute.before"];
     await expect(
       guard({ tool: "bash" }, { args: { command: "curl https://example.com/secret" } })
-    ).rejects.toThrowError(/swarm_fetch/);
+    ).rejects.toThrowError(/scraper-swarm MCP tools/);
     await expect(
       guard({ tool: "shell" }, { args: { command: "wget http://example.com/x" } })
-    ).rejects.toThrowError(/swarm_fetch/);
+    ).rejects.toThrowError(/scraper-swarm MCP tools/);
     // Plain shell without network intent passes.
     await expect(
       guard({ tool: "bash" }, { args: { command: "ls -la" } })
@@ -64,7 +64,7 @@ describe("ScraperSwarmPlugin", () => {
       await guard({ tool: "WebFetch" }, { args: { url: secretUrl } });
       expect.unreachable();
     } catch (e: any) {
-      expect(String(e.message)).toContain("swarm_fetch");
+      expect(String(e.message)).toContain("scraper-swarm MCP tools");
       expect(String(e.message)).not.toContain("SECRET123");
       expect(String(e.message)).not.toContain(secretUrl);
     }
@@ -118,7 +118,7 @@ describe("ScraperSwarmPlugin", () => {
     ]) {
       await expect(
         guard({ tool: "bash" }, { args: { command } })
-      ).rejects.toThrowError(/swarm_fetch/);
+      ).rejects.toThrowError(/scraper-swarm MCP tools/);
     }
     // Plain shell without exfil intent still passes (incl. "sync" nc-false-positive guard).
     await expect(

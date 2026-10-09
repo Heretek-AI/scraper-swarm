@@ -95,6 +95,12 @@ class ServiceEntry(_Strict):
     param_env: dict[str, str] = Field(default_factory=dict)
     # May the "advanced native endpoint" toggle expose this service via the gateway auth?
     native_exposable: bool = False
+    # Ticket #6: in-stack peers this engine may reach directly (NO_PROXY).
+    # Default: none — every HTTP destination goes through the egress proxy
+    # (Smokescreen denies internal ranges there). Declare a peer only for a
+    # genuine direct need, e.g. gpt-researcher -> searxng retriever HTTP.
+    # Non-HTTP peer traffic (e.g. Redis RESP) never consults proxy env vars.
+    direct_peers: list[str] = Field(default_factory=list)
 
     @field_validator("id")
     @classmethod
@@ -141,4 +147,9 @@ def load_catalog(directory: Path) -> dict[str, ServiceEntry]:
         for dep in entry.requires:
             if dep not in entries:
                 raise ValueError(f"{entry.id} requires unknown service '{dep}'")
+        for peer in entry.direct_peers:
+            if peer not in entries:
+                raise ValueError(f"{entry.id} direct_peers unknown service '{peer}'")
+            if peer == "egress-web":
+                raise ValueError(f"{entry.id} direct_peers must never include the egress proxy")
     return entries

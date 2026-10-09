@@ -28,10 +28,16 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --all-packages
 
       - name: Run Python unit & integration tests
         run: uv run pytest apps/ -v --tb=short
+
+      - name: Lint (ruff)
+        run: uv run ruff check apps/ tests/
+
+      - name: Type check (mypy)
+        run: uv run mypy apps/gateway/src apps/panel-api/src apps/swarmd/src --ignore-missing-imports
 
   frontend-and-plugin-test:
     name: Frontend Build & Plugin Tests
