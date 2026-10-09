@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from panel_api.audit import AuditLogger
@@ -62,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--rpm", type=int, default=60)
     c.add_argument("--expires", default="720h")
     c.add_argument("--allow-never-expire", action="store_true")
+    c.add_argument(
+        "--audit-mode",
+        default="default",
+        help="audit query privacy: default (global), verbatim, hashed, redacted",
+    )
 
     r = ksub.add_parser("rotate", help="rotate a key (old stays valid for --grace)")
     r.add_argument("ref", help="key id or name")
@@ -72,6 +78,15 @@ def build_parser() -> argparse.ArgumentParser:
     ksub.add_parser("list", help="list keys (prefixes only, never secrets)")
     d = ksub.add_parser("revoke", help="revoke (delete) a key")
     d.add_argument("ref", help="key id or name")
+
+    audit = sub.add_parser("audit", help="audit log maintenance")
+    asub = audit.add_subparsers(dest="cmd", required=True)
+    pr = asub.add_parser("prune", help="delete rows older than retention, keep chain verifiable")
+    pr.add_argument(
+        "--retention-days",
+        default=None,
+        help="override SWARM_AUDIT_RETENTION_DAYS (required when unset)",
+    )
     return p
 
 
@@ -92,6 +107,7 @@ async def _cmd_create(db: Database, args) -> int:
             scopes=scopes,
             rate_limit_rpm=args.rpm,
             expires_at=expiry_iso(None if hours is None else int(hours)),
+            audit_query_mode=args.audit_mode,
         )
     except KeyExistsError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -103,7 +119,12 @@ async def _cmd_create(db: Database, args) -> int:
         actor="swarmctl",
         action="create_agent_key",
         target=key["id"],
-        details={"name": key["name"], "scopes": key["scopes"], "key_prefix": key["key_prefix"]},
+        details={
+            "name": key["name"],
+            "scopes": key["scopes"],
+            "key_prefix": key["key_prefix"],
+            "audit_query_mode": key["audit_query_mode"] or "default",
+        },
     )
     print(f"created key '{key['name']}' (id {key['id']})")
     print(f"raw_key: {key['raw_key']}")
@@ -159,7 +180,7 @@ async def _cmd_rotate(db: Database, args) -> int:
 async def _cmd_list(db: Database, args) -> int:
     async with db.conn.execute(
         "SELECT id, name, key_prefix, scopes, rate_limit_rpm, created_at,"
-        " expires_at, last_used_at FROM agent_keys ORDER BY created_at DESC"
+        " expires_at, last_used_at, audit_query_mode FROM agent_keys ORDER BY created_at DESC"
     ) as cur:
         rows = await cur.fetchall()
     print(
@@ -174,6 +195,7 @@ async def _cmd_list(db: Database, args) -> int:
                     "created_at": r["created_at"],
                     "expires_at": r["expires_at"],
                     "last_used_at": r["last_used_at"],
+                    "audit_query_mode": r["audit_query_mode"] or "default",
                 }
                 for r in rows
             ],
@@ -195,27 +217,57 @@ async def _cmd_revoke(db: Database, args) -> int:
     return 0
 
 
+async def _cmd_audit_prune(db: Database, args) -> int:
+    """Deletes audit rows older than retention, keeping a checkpoint row so
+    verify_chain still passes (ticket #10)."""
+    raw_days = args.retention_days
+    if raw_days is None:
+        raw_days = os.environ.get("SWARM_AUDIT_RETENTION_DAYS", "")
+    try:
+        days = float(str(raw_days).strip())
+    except ValueError:
+        print(
+            "error: retention unknown: pass --retention-days or set SWARM_AUDIT_RETENTION_DAYS",
+            file=sys.stderr,
+        )
+        return 1
+    if days <= 0:
+        print("error: retention must be positive days (0 disables pruning)", file=sys.stderr)
+        return 1
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    pruned = await AuditLogger(db.conn).prune_older_than(cutoff)
+    await AuditLogger(db.conn).log(
+        actor="swarmctl",
+        action="prune_audit",
+        details={"pruned": pruned, "cutoff": cutoff},
+    )
+    print(f"pruned {pruned} audit rows older than {cutoff} (checkpoint kept)")
+    return 0
+
+
 async def amain(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.group != "keys":
-        print("error: unknown command", file=sys.stderr)
-        return 2
     db = Database(_db_path(args))
     await db.connect()
     try:
-        if args.cmd == "create":
-            return await _cmd_create(db, args)
-        if args.cmd == "rotate":
-            return await _cmd_rotate(db, args)
-        if args.cmd == "list":
-            return await _cmd_list(db, args)
-        if args.cmd == "revoke":
-            return await _cmd_revoke(db, args)
+        if args.group == "keys":
+            if args.cmd == "create":
+                return await _cmd_create(db, args)
+            if args.cmd == "rotate":
+                return await _cmd_rotate(db, args)
+            if args.cmd == "list":
+                return await _cmd_list(db, args)
+            if args.cmd == "revoke":
+                return await _cmd_revoke(db, args)
+        elif args.group == "audit":
+            if args.cmd == "prune":
+                return await _cmd_audit_prune(db, args)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     finally:
         await db.close()
+    print("error: unknown command", file=sys.stderr)
     return 2
 
 

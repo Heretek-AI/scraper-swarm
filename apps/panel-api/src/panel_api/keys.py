@@ -16,6 +16,10 @@ from datetime import UTC, datetime, timedelta
 
 ALLOWED_SCOPES = frozenset({"search", "scrape", "admin"})
 
+# Ticket #10: per-key audit query privacy. "default" (stored NULL) inherits
+# the SWARM_AUDIT_QUERY_MODE global.
+AUDIT_QUERY_MODES = frozenset({"default", "verbatim", "hashed", "redacted"})
+
 # Default TTL mirrors the HTTP route (30 days); the CLI default matches.
 DEFAULT_KEY_TTL_HOURS = 720
 MAX_NAME_LENGTH = 64
@@ -55,6 +59,18 @@ def expiry_iso(expires_in_hours: int | None) -> str | None:
     return (datetime.now(UTC) + timedelta(hours=expires_in_hours)).isoformat()
 
 
+def validate_audit_mode(mode: str | None) -> str | None:
+    """Validates a per-key audit mode; 'default'/None stores NULL (inherit)."""
+    if mode is None:
+        return None
+    cleaned = str(mode).strip().lower()
+    if cleaned in ("default", "inherit", ""):
+        return None
+    if cleaned not in AUDIT_QUERY_MODES:
+        raise ValueError(f"Unknown audit mode '{mode}'. Allowed: {sorted(AUDIT_QUERY_MODES)}")
+    return cleaned
+
+
 async def mint_key(
     conn,
     *,
@@ -62,10 +78,12 @@ async def mint_key(
     scopes: list[str],
     rate_limit_rpm: int = 60,
     expires_at: str | None = None,
+    audit_query_mode: str | None = None,
 ) -> dict:
     """Inserts a key row; returns public fields plus the one-time raw bearer."""
     cleaned = clean_name(name)
     deduped = validate_scopes(list(scopes))
+    mode = validate_audit_mode(audit_query_mode)
     key_id = secrets.token_hex(16)
     raw_key = generate_raw_key()
     key_prefix = raw_key[:14] + "..."
@@ -74,8 +92,9 @@ async def mint_key(
         await conn.execute(
             """
             INSERT INTO agent_keys
-                (id, name, key_hash, key_prefix, scopes, rate_limit_rpm, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (id, name, key_hash, key_prefix, scopes, rate_limit_rpm,
+                 expires_at, audit_query_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 key_id,
@@ -85,6 +104,7 @@ async def mint_key(
                 json.dumps(deduped),
                 rate_limit_rpm,
                 expires_at,
+                mode,
             ),
         )
         await conn.commit()
@@ -98,6 +118,7 @@ async def mint_key(
         "scopes": deduped,
         "rate_limit_rpm": rate_limit_rpm,
         "expires_at": expires_at,
+        "audit_query_mode": mode,
     }
 
 
@@ -105,7 +126,8 @@ async def find_key(conn, ref: str):
     """Finds a key row by id or (case-insensitive) name."""
     async with conn.execute(
         "SELECT id, name, key_hash, key_prefix, scopes, rate_limit_rpm,"
-        " created_at, expires_at FROM agent_keys WHERE id = ? OR name = ? COLLATE NOCASE",
+        " created_at, expires_at, audit_query_mode FROM agent_keys"
+        " WHERE id = ? OR name = ? COLLATE NOCASE",
         (ref, ref),
     ) as cur:
         return await cur.fetchone()
@@ -133,12 +155,17 @@ async def rotate_key(
         (retired_name, grace_expires, row["id"]),
     )
     await conn.commit()
+    try:
+        stored_mode = row["audit_query_mode"]
+    except (KeyError, IndexError):
+        stored_mode = None
     new = await mint_key(
         conn,
         name=old_name,
         scopes=json.loads(row["scopes"]),
         rate_limit_rpm=int(row["rate_limit_rpm"] or 60),
         expires_at=expiry_iso(expires_in_hours),
+        audit_query_mode=stored_mode,
     )
     return {
         "old": {"id": row["id"], "name": retired_name, "expires_at": grace_expires},

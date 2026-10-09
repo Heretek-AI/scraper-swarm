@@ -51,6 +51,14 @@ without `allow_placeholder_host` once `SWARM_PUBLIC_MCP_URL` is configured
 call refreshes `last_used_at` (throttled to one write per key per minute;
 visible in `GET /agents/keys` and `swarmctl keys list`).
 
+Per-key audit query privacy (ticket #10): `--audit-mode
+verbatim|hashed|redacted` (API: `audit_query_mode`, default inherits the
+`SWARM_AUDIT_QUERY_MODE` global, default `verbatim`). `hashed` stores a
+salted HMAC (`SWARM_AUDIT_HMAC_SALT`, server-held — required for correlation;
+missing salt falls back to `redacted`), `redacted` stores length and
+category only. The hash chain covers the stored form, so it verifies in
+every mode. See `GET /security/audit/privacy` for the posture.
+
 ### Readiness
 
 `GET /ready` (routed through Caddy, like `/health`) reports
@@ -250,3 +258,12 @@ whitespace/missing/unparseable/naive-past → `401`); legacy DBs missing
 expired) so they never `500`. Audit scrub (`scrub_secrets_from_text`) redacts
 `swarm_sec_*`, `Bearer` tokens, `token=`/`secret=` KV, and embedded-URL
 query/fragments while preserving non-secret query forensics.
+
+Query privacy and retention (ticket #10): audit targets are stored per the
+key's `audit_query_mode` (`verbatim` today, `hashed` salted-HMAC, or
+`redacted` length-plus-category; unknown values fail closed to `redacted`).
+`swarmctl audit prune --retention-days N` (default from
+`SWARM_AUDIT_RETENTION_DAYS`) deletes rows older than the retention window
+and appends an `audit_checkpoint` row recording the deleted head hash, so
+`POST /security/audit/verify` still passes. Checkpoint rows are never
+pruned. Retention `0`/unset disables pruning.

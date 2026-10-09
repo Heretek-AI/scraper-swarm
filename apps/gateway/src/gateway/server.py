@@ -23,8 +23,11 @@ from fastapi import Cookie, FastAPI, Header, HTTPException, Request, Response, s
 from mcp.server.mcpserver import MCPServer
 from panel_api.audit import AuditLogger
 from panel_api.ssrf_guard import (
+    AUDIT_QUERY_MODES,
+    apply_audit_query_mode,
     audit_target_for_action,
     deny_reason_for_url,
+    global_audit_query_mode,
     is_session_expired_fail_closed,
     resolver_fail_closed,
     sanitize_details,
@@ -192,6 +195,57 @@ def _reset_denied_audit() -> None:
     _DENIED_AUDIT_LAST.clear()
 
 
+async def _resolve_audit_mode(agent_name: str | None) -> str:
+    """Per-key audit_query_mode, else the SWARM_AUDIT_QUERY_MODE global.
+
+    Ticket #10: NULL/missing/inherit values use the global default (verbatim
+    unless configured); unknown stored values fail closed to redacted (least
+    disclosure); any lookup failure keeps the default so audit logging never
+    breaks the request path.
+    """
+    default = global_audit_query_mode()
+    if not agent_name:
+        return default
+    try:
+        if not os.path.exists(DB_PATH):
+            return default
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            try:
+                row = await _select_audit_mode(db, agent_name)
+            except Exception:
+                await _ensure_gateway_agent_key_schema(db)
+                try:
+                    row = await _select_audit_mode(db, agent_name)
+                except Exception:
+                    return default
+            if row is None:
+                return default
+            try:
+                stored = row["audit_query_mode"]
+            except (KeyError, IndexError):
+                return default
+            if stored is None:
+                return default
+            mode = str(stored).strip().lower()
+            if mode in ("default", "inherit", ""):
+                return default
+            if mode in AUDIT_QUERY_MODES:
+                return mode
+            log.debug("Unknown audit_query_mode for key: least-disclosure redacted")
+            return "redacted"
+    except Exception as e:
+        log.debug("audit mode lookup skipped: %s", e)
+        return default
+
+
+async def _select_audit_mode(db: aiosqlite.Connection, agent_name: str):
+    async with db.execute(
+        "SELECT audit_query_mode FROM agent_keys WHERE name = ?", (agent_name,)
+    ) as cur:
+        return await cur.fetchone()
+
+
 async def log_agent_activity(
     agent_name: str, action: str, target: str | None = None, details: dict[str, Any] | None = None
 ) -> None:
@@ -211,13 +265,18 @@ async def log_agent_activity(
         log.warning("Agent activity audit skipped: database path %s missing", DB_PATH)
         return
     try:
+        mode = await _resolve_audit_mode(agent_name)
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             logger = AuditLogger(db)
+            target = audit_target_for_action(action, target) if target else None
+            # Ticket #10: store the mode-mapped form (chain covers it, so it
+            # verifies in every mode). Default verbatim == today's behaviour.
+            target = apply_audit_query_mode(mode, action, target)
             await logger.log(
                 actor=f"agent:{agent_name}",
                 action=action,
-                target=audit_target_for_action(action, target) if target else None,
+                target=target,
                 details=sanitize_details(details),
             )
     except Exception as e:
@@ -287,6 +346,12 @@ async def _ensure_gateway_agent_key_schema(db: aiosqlite.Connection) -> None:
             cols = [r["name"] for r in await cur.fetchall()]
         if cols and "last_used_at" not in cols:
             await db.execute("ALTER TABLE agent_keys ADD COLUMN last_used_at TIMESTAMP")
+            await db.commit()
+        # Ticket #10: legacy DBs predate audit_query_mode (query privacy).
+        async with db.execute("PRAGMA table_info(agent_keys)") as cur:
+            cols = [r["name"] for r in await cur.fetchall()]
+        if cols and "audit_query_mode" not in cols:
+            await db.execute("ALTER TABLE agent_keys ADD COLUMN audit_query_mode TEXT")
             await db.commit()
     except Exception as e:
         log.debug("Gateway agent-key schema migration skipped: %s", e)

@@ -22,6 +22,8 @@ Security notes:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import ipaddress
 import os
 import re
@@ -52,6 +54,52 @@ def resolver_fail_closed() -> bool:
 # Phase 03 retry1 QA-B: search/research actions carry free-text queries, not
 # URLs. Redacting them as URLs destroys forensics ("(invalid-url)").
 _SEARCH_QUERY_ACTIONS = frozenset({"web_search", "deep_research"})
+
+
+# Ticket #10 (gateway contract v1): audit query privacy modes. `verbatim`
+# stores the scrubbed target as today; `hashed` stores a salted HMAC (equal
+# queries correlate without being revealed); `redacted` stores only length
+# and category. The hash chain always covers the STORED form, so it verifies
+# in every mode.
+AUDIT_QUERY_MODES = frozenset({"verbatim", "hashed", "redacted"})
+
+
+def global_audit_query_mode() -> str:
+    """The SWARM_AUDIT_QUERY_MODE default (verbatim unless configured)."""
+    raw = os.environ.get("SWARM_AUDIT_QUERY_MODE", "verbatim").strip().lower()
+    return raw if raw in AUDIT_QUERY_MODES else "verbatim"
+
+
+def _redacted_query_form(action: str, target: str) -> str:
+    if action in _SEARCH_QUERY_ACTIONS:
+        kind = "query"
+    elif "://" in target:
+        kind = "url"
+    else:
+        kind = "other"
+    return f"redacted:{kind}:len={len(target)}"
+
+
+def apply_audit_query_mode(mode: str, action: str, target: str | None) -> str | None:
+    """Maps a scrubbed audit target to its stored form for *mode*.
+
+    Unknown modes fail closed to redacted (least disclosure). Hashed mode
+    without SWARM_AUDIT_HMAC_SALT configured also falls back to redacted so
+    a missing salt can never silently downgrade to verbatim.
+    """
+    if target is None or mode == "verbatim":
+        return target
+    if mode == "hashed":
+        salt = os.environ.get("SWARM_AUDIT_HMAC_SALT", "")
+        if salt:
+            digest = hmac.new(
+                salt.encode(),
+                f"{action}\x00{target}".encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            return f"hmac-sha256:{digest}"
+        return _redacted_query_form(action, target)
+    return _redacted_query_form(action, target)
 
 
 def is_expiry_passed(expires_at: str | None) -> bool:

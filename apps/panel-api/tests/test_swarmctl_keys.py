@@ -167,3 +167,21 @@ async def test_verify_updates_last_used_at(tmp_path: Path):
         await db.close()
     finally:
         gw_server._reset_rate_limits()
+
+
+@pytest.mark.asyncio
+async def test_cli_create_audit_mode(tmp_path: Path, capsys):
+    """Ticket #10: CLI audit mode stored and listed."""
+    from panel_api.swarmctl import amain as _amain
+
+    db_file = tmp_path / "panel.db"
+    assert await _amain(["--db", str(db_file), "keys", "create", "--name", "priv",
+                         "--scopes", "search", "--audit-mode", "redacted"]) == 0
+    capsys.readouterr()
+    assert await _amain(["--db", str(db_file), "keys", "create", "--name", "priv2",
+                         "--scopes", "search", "--audit-mode", "bogus"]) != 0
+    assert await _amain(["--db", str(db_file), "keys", "list"]) == 0
+    import json as _json
+
+    rows = _json.loads(capsys.readouterr().out)
+    assert {r["name"]: r["audit_query_mode"] for r in rows}["priv"] == "redacted"

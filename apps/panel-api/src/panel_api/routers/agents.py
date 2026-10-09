@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from panel_api.audit import AuditLogger
 from panel_api.db import Database
-from panel_api.keys import KeyExistsError, mint_key
+from panel_api.keys import AUDIT_QUERY_MODES, KeyExistsError, mint_key
 from panel_api.routers.auth import SessionInfo, get_db, require_role
 from pydantic import BaseModel, Field
 
@@ -67,6 +67,9 @@ class CreateAgentKeyRequest(BaseModel):
     # a REPLACE-ME host. Issuance with a placeholder host now requires explicit
     # acknowledgement (mirrors the TTL ack) so the warning cannot be ignored.
     allow_placeholder_host: bool = Field(default=False)
+    # Ticket #10: per-key audit query privacy ("default" inherits the
+    # SWARM_AUDIT_QUERY_MODE global).
+    audit_query_mode: str = Field(default="default")
 
 
 class CreateAgentKeyResponse(BaseModel):
@@ -77,6 +80,7 @@ class CreateAgentKeyResponse(BaseModel):
     scopes: list[str]
     rate_limit_rpm: int
     expires_at: str | None = None
+    audit_query_mode: str | None = None
     opencode_snippet: dict
 
 
@@ -152,6 +156,14 @@ async def create_agent_key(
 
     # Ticket #7: storage goes through the shared mint (same columns, same
     # NOCASE race backstop -> 409). Gates above run before any row is minted.
+    # Ticket #10: per-key audit mode validated here (422 on bogus values).
+    mode = str(req.audit_query_mode or "default").strip().lower()
+    if mode not in AUDIT_QUERY_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown audit_query_mode '{req.audit_query_mode}'. "
+            f"Allowed: {sorted(AUDIT_QUERY_MODES)}",
+        )
     try:
         minted = await mint_key(
             db.conn,
@@ -159,6 +171,7 @@ async def create_agent_key(
             scopes=deduped_scopes,
             rate_limit_rpm=req.rate_limit_rpm,
             expires_at=expires_at,
+            audit_query_mode=mode,
         )
     except KeyExistsError:
         # UNIQUE NOCASE loser of a concurrent same-name race (or a
@@ -166,6 +179,8 @@ async def create_agent_key(
         raise HTTPException(
             status_code=409, detail=f"Agent key name '{clean_name}' already exists"
         ) from None
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
     key_id, raw_key, key_prefix = minted["id"], minted["raw_key"], minted["key_prefix"]
 
     logger = AuditLogger(db.conn)
@@ -214,6 +229,7 @@ async def create_agent_key(
         scopes=deduped_scopes,
         rate_limit_rpm=req.rate_limit_rpm,
         expires_at=expires_at,
+        audit_query_mode=minted["audit_query_mode"],
         opencode_snippet=opencode_snippet,
     )
 
@@ -225,7 +241,7 @@ async def list_agent_keys(
 ):
     query = (
         "SELECT id, name, key_prefix, scopes, rate_limit_rpm, created_at, expires_at, "
-        "last_used_at FROM agent_keys ORDER BY created_at DESC"
+        "last_used_at, audit_query_mode FROM agent_keys ORDER BY created_at DESC"
     )
     async with db.conn.execute(query) as cur:
         rows = await cur.fetchall()
@@ -239,6 +255,7 @@ async def list_agent_keys(
                 "created_at": r["created_at"],
                 "expires_at": r["expires_at"],
                 "last_used_at": r["last_used_at"],
+                "audit_query_mode": r["audit_query_mode"] or "default",
             }
             for r in rows
         ]
