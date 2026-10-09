@@ -1,0 +1,130 @@
+{
+  "contract_version": 1,
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "tools/list"
+  },
+  "response_body": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "tools": [
+        {
+          "description": "Search the web using SearXNG meta-search engine.",
+          "inputSchema": {
+            "properties": {
+              "limit": {
+                "default": 5,
+                "maximum": 20,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "query": {
+                "minLength": 1,
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "title": "WebSearchArgs",
+            "type": "object"
+          },
+          "name": "web_search",
+          "outputSchema": {
+            "$defs": {
+              "SearchResultItem": {
+                "properties": {
+                  "engine": {
+                    "default": "searxng",
+                    "title": "Engine",
+                    "type": "string"
+                  },
+                  "rank": {
+                    "title": "Rank",
+                    "type": "integer"
+                  },
+                  "snippet": {
+                    "title": "Snippet",
+                    "type": "string"
+                  },
+                  "title": {
+                    "title": "Title",
+                    "type": "string"
+                  },
+                  "url": {
+                    "title": "Url",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "rank",
+                  "title",
+                  "url",
+                  "snippet"
+                ],
+                "title": "SearchResultItem",
+                "type": "object"
+              }
+            },
+            "properties": {
+              "engine": {
+                "default": "searxng",
+                "title": "Engine",
+                "type": "string"
+              },
+              "fetched_at": {
+                "title": "Fetched At",
+                "type": "string"
+              },
+              "query": {
+                "title": "Query",
+                "type": "string"
+              },
+              "results": {
+                "items": {
+                  "$ref": "#/$defs/SearchResultItem"
+                },
+                "title": "Results",
+                "type": "array"
+              }
+            },
+            "required": [
+              "query",
+              "results",
+              "fetched_at"
+            ],
+            "title": "WebSearchStructured",
+            "type": "object"
+          }
+        },
+        {
+          "description": "Conduct autonomous deep web research and synthesis using GPT Researcher.",
+          "inputSchema": {
+            "properties": {
+              "query": {
+                "minLength": 1,
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "title": "DeepResearchArgs",
+            "type": "object"
+          },
+          "name": "deep_research"
+        }
+      ]
+    }
+  },
+  "response_headers": {
+    "content-type": "application/json",
+    "x-swarm-contract": "1"
+  },
+  "response_status": 200
+}

@@ -100,8 +100,8 @@ async def get_current_user(
                 detail="Session expired",
             )
         return SessionInfo(
-            user_id=data["user_id"],
-            username=data["username"],
+            user_id=str(data["user_id"]),
+            username=str(data["username"]),
             role=data["role"],  # type: ignore
         )
 

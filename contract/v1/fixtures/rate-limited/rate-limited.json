@@ -1,0 +1,17 @@
+{
+  "contract_version": 1,
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "tools/list"
+  },
+  "response_body": {
+    "detail": "Rate limit exceeded (1 req/min)"
+  },
+  "response_headers": {
+    "content-type": "application/json",
+    "retry-after": "<retry_after_s>",
+    "x-swarm-contract": "1"
+  },
+  "response_status": 429
+}

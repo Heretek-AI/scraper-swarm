@@ -1,0 +1,255 @@
+{
+  "contract_version": 1,
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "tools/list"
+  },
+  "response_body": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "tools": [
+        {
+          "description": "Search the web using SearXNG meta-search engine.",
+          "inputSchema": {
+            "properties": {
+              "limit": {
+                "default": 5,
+                "maximum": 20,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              },
+              "query": {
+                "minLength": 1,
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "title": "WebSearchArgs",
+            "type": "object"
+          },
+          "name": "web_search",
+          "outputSchema": {
+            "$defs": {
+              "SearchResultItem": {
+                "properties": {
+                  "engine": {
+                    "default": "searxng",
+                    "title": "Engine",
+                    "type": "string"
+                  },
+                  "rank": {
+                    "title": "Rank",
+                    "type": "integer"
+                  },
+                  "snippet": {
+                    "title": "Snippet",
+                    "type": "string"
+                  },
+                  "title": {
+                    "title": "Title",
+                    "type": "string"
+                  },
+                  "url": {
+                    "title": "Url",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "rank",
+                  "title",
+                  "url",
+                  "snippet"
+                ],
+                "title": "SearchResultItem",
+                "type": "object"
+              }
+            },
+            "properties": {
+              "engine": {
+                "default": "searxng",
+                "title": "Engine",
+                "type": "string"
+              },
+              "fetched_at": {
+                "title": "Fetched At",
+                "type": "string"
+              },
+              "query": {
+                "title": "Query",
+                "type": "string"
+              },
+              "results": {
+                "items": {
+                  "$ref": "#/$defs/SearchResultItem"
+                },
+                "title": "Results",
+                "type": "array"
+              }
+            },
+            "required": [
+              "query",
+              "results",
+              "fetched_at"
+            ],
+            "title": "WebSearchStructured",
+            "type": "object"
+          }
+        },
+        {
+          "description": "Scrape and extract markdown content from a webpage using Crawl4AI.",
+          "inputSchema": {
+            "properties": {
+              "url": {
+                "description": "Target webpage URL to crawl (max 2048 chars; longer URLs are SSRF-denied)",
+                "minLength": 1,
+                "title": "Url",
+                "type": "string"
+              }
+            },
+            "required": [
+              "url"
+            ],
+            "title": "FetchPageArgs",
+            "type": "object"
+          },
+          "name": "fetch_page",
+          "outputSchema": {
+            "properties": {
+              "bytes": {
+                "title": "Bytes",
+                "type": "integer"
+              },
+              "content": {
+                "title": "Content",
+                "type": "string"
+              },
+              "content_sha256": {
+                "title": "Content Sha256",
+                "type": "string"
+              },
+              "content_type": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Content Type"
+              },
+              "engine": {
+                "default": "crawl4ai",
+                "title": "Engine",
+                "type": "string"
+              },
+              "fetched_at": {
+                "title": "Fetched At",
+                "type": "string"
+              },
+              "final_url": {
+                "title": "Final Url",
+                "type": "string"
+              },
+              "format": {
+                "enum": [
+                  "markdown",
+                  "html",
+                  "text"
+                ],
+                "title": "Format",
+                "type": "string"
+              },
+              "requested_url": {
+                "title": "Requested Url",
+                "type": "string"
+              },
+              "status_code": {
+                "title": "Status Code",
+                "type": "integer"
+              },
+              "title": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Title"
+              },
+              "truncated": {
+                "title": "Truncated",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "requested_url",
+              "final_url",
+              "status_code",
+              "fetched_at",
+              "format",
+              "content",
+              "content_sha256",
+              "bytes",
+              "truncated"
+            ],
+            "title": "FetchPageStructured",
+            "type": "object"
+          }
+        },
+        {
+          "description": "Conduct autonomous deep web research and synthesis using GPT Researcher.",
+          "inputSchema": {
+            "properties": {
+              "query": {
+                "minLength": 1,
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "title": "DeepResearchArgs",
+            "type": "object"
+          },
+          "name": "deep_research"
+        },
+        {
+          "description": "Extract content from anti-bot protected sites using Scrapling Camoufox stealth engine.",
+          "inputSchema": {
+            "properties": {
+              "url": {
+                "description": "Target webpage URL (max 2048 chars; longer URLs are SSRF-denied)",
+                "minLength": 1,
+                "title": "Url",
+                "type": "string"
+              }
+            },
+            "required": [
+              "url"
+            ],
+            "title": "StealthScrapeArgs",
+            "type": "object"
+          },
+          "name": "stealth_scrape"
+        }
+      ]
+    }
+  },
+  "response_headers": {
+    "content-type": "application/json",
+    "x-swarm-contract": "1"
+  },
+  "response_status": 200
+}

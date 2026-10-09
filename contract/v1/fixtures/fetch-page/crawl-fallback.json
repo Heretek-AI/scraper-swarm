@@ -1,0 +1,45 @@
+{
+  "contract_version": 1,
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "arguments": {
+        "url": "https://example.com/needs-crawl"
+      },
+      "name": "fetch_page"
+    }
+  },
+  "response_body": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "content": [
+        {
+          "text": "# Fallback\n\nFallback body text.",
+          "type": "text"
+        }
+      ],
+      "structuredContent": {
+        "bytes": 31,
+        "content": "# Fallback\n\nFallback body text.",
+        "content_sha256": "73207980cb3efb1abb0f59ba5ac0fbfa2e9e3ac430144123d9d407f0ac550b55",
+        "content_type": null,
+        "engine": "crawl4ai",
+        "fetched_at": "<fetched_at>",
+        "final_url": "https://example.com/fallback-final",
+        "format": "markdown",
+        "requested_url": "https://example.com/needs-crawl",
+        "status_code": 200,
+        "title": "Fallback",
+        "truncated": false
+      }
+    }
+  },
+  "response_headers": {
+    "content-type": "application/json",
+    "x-swarm-contract": "1"
+  },
+  "response_status": 200
+}

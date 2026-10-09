@@ -1,0 +1,22 @@
+{
+  "contract_version": 1,
+  "request": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "arguments": {
+        "url": "https://example.com/"
+      },
+      "name": "fetch_page"
+    }
+  },
+  "response_body": {
+    "detail": "Key lacks required scope 'scrape'"
+  },
+  "response_headers": {
+    "content-type": "application/json",
+    "x-swarm-contract": "1"
+  },
+  "response_status": 403
+}
