@@ -58,17 +58,44 @@ def test_internet_route_exists_only_on_the_proxy(catalog):
     assert "internal" not in nets["egress-out"]
 
 
-def test_web_facing_services_get_proxy_env_and_peers_bypass(catalog):
+def test_web_facing_services_get_proxy_env_and_minimal_no_proxy(catalog):
+    """Ticket #6: NO_PROXY carries only each engine's declared direct_peers
+    (default: none), so a compromised fetch path cannot reach in-stack peers
+    directly. The proxy itself and loopback never bypass."""
     compose = _render(catalog, {"crawl4ai": Selection(), "searxng": Selection()})
     env = compose["services"]["crawl4ai"]["environment"]
     assert env["HTTPS_PROXY"] == "http://egress-web:4750"
+    assert env["NO_PROXY"] == ""
+    assert env["no_proxy"] == ""
     assert "egress-web" not in env["NO_PROXY"].split(",")  # never bypass the proxy itself
-    assert "valkey" in env["NO_PROXY"].split(",")  # in-stack peers are reached directly
     # P1-live-smoke NO_PROXY fix: loopback must NOT bypass Smokescreen or
     # fetch_page(http://127.0.0.1/...) skips the egress proxy entirely.
     assert "127.0.0.1" not in env["NO_PROXY"].split(",")
     assert "localhost" not in env["NO_PROXY"].split(",")
     assert "environment" not in compose["services"]["valkey"]  # internal-only: no proxy env
+
+
+def test_declared_direct_peers_only_bypass_the_proxy(catalog):
+    """Ticket #6: gpt-researcher genuinely needs its retriever (searxng) over
+    plain HTTP, so it declares direct_peers=[searxng] — and nothing else."""
+    compose = _render(catalog, {"gpt-researcher": Selection()})
+    env = compose["services"]["gpt-researcher"]["environment"]
+    assert env["NO_PROXY"].split(",") == ["searxng"]
+    assert "valkey" not in env["NO_PROXY"].split(",")
+    assert "egress-web" not in env["NO_PROXY"].split(",")
+
+
+def test_fetch_path_engines_cannot_reach_peers_directly(catalog):
+    """Ticket #6: the URL-fetching engines (scrapling, crawl4ai, searxng) have
+    an empty NO_PROXY — every HTTP destination goes through Smokescreen."""
+    compose = _render(
+        catalog,
+        {"scrapling": Selection(), "crawl4ai": Selection(), "searxng": Selection()},
+    )
+    for name in ("scrapling", "crawl4ai", "searxng"):
+        env = compose["services"][name]["environment"]
+        assert env["NO_PROXY"] == "", name
+        assert env["HTTPS_PROXY"] == "http://egress-web:4750", name
 
 
 def test_chromium_seccomp_profile_is_a_file_in_our_dir(catalog):

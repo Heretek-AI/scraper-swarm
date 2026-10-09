@@ -23,6 +23,7 @@ Security notes:
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 import socket
 from urllib.parse import urlsplit
@@ -30,6 +31,23 @@ from urllib.parse import urlsplit
 # Keys whose audit-detail values must be redacted to preserve the
 # no-secrets-in-logs/audit invariant.
 _SENSITIVE_KEY_PARTS = ("token", "secret", "password", "authorization", "bearer", "cookie")
+
+# Ticket #6 (gateway contract v1): input bounds and fail-closed resolver default.
+#
+# - URLs longer than MAX_URL_LENGTH are denied without DNS (fail-closed).
+# - Unresolvable names / resolver exceptions fail closed by default so an
+#   automated client cannot slip internal targets past the first layer.
+#   Operators may opt back into delegation to Smokescreen (the second layer,
+#   which denies unresolvable hosts at connection time) with
+#   SWARM_SSRF_RESOLVER_FAIL_CLOSED=0. The opt-out is deliberate and logged.
+MAX_URL_LENGTH = 2048
+
+
+def resolver_fail_closed() -> bool:
+    """True unless the operator explicitly opts into fail-open delegation."""
+    raw = os.environ.get("SWARM_SSRF_RESOLVER_FAIL_CLOSED", "").strip().lower()
+    return raw not in ("0", "false", "no", "off", "open")
+
 
 # Phase 03 retry1 QA-B: search/research actions carry free-text queries, not
 # URLs. Redacting them as URLs destroys forensics ("(invalid-url)").
@@ -325,16 +343,36 @@ def resolve_host(host: str, timeout: float = 3.0) -> list[str]:
         socket.setdefaulttimeout(None)
 
 
-def deny_reason_for_url(url: str, timeout: float = 3.0) -> str | None:
+def deny_reason_for_url(
+    url: str, timeout: float = 3.0, fail_closed_on_unresolvable: bool | None = None
+) -> str | None:
     """Fail-closed gateway pre-check; returns a denial reason or ``None`` to allow.
 
-    Denies non-http(s) schemes, empty hosts, every non-globally-routable IP
-    literal (loopback, RFC1918, CGNAT 100.64/10, link-local/metadata
-    169.254/16, multicast, reserved, unspecified -- in decimal, octal, hex,
-    dword, or shortened encodings), ``localhost``, and DNS names that resolve
-    exclusively to non-global addresses. Unresolvable names return ``None`` so
-    Smokescreen decides at connection time (it denies unresolvable hosts).
+    Denies non-http(s) schemes, empty hosts, over-long URLs, every
+    non-globally-routable IP literal (loopback, RFC1918, CGNAT 100.64/10,
+    link-local/metadata 169.254/16, multicast, reserved, unspecified -- in
+    decimal, octal, hex, dword, or shortened encodings), ``localhost``, and
+    DNS names that resolve exclusively to non-global addresses.
+
+    Unresolvable names and resolver exceptions fail closed by default
+    (``SWARM_SSRF_RESOLVER_FAIL_CLOSED``, see :func:`resolver_fail_closed`);
+    pass ``fail_closed_on_unresolvable=False`` (or set the env opt-out) to
+    delegate those to Smokescreen, which denies unresolvable hosts at
+    connection time.
     """
+    if len(url) > MAX_URL_LENGTH:
+        return f"URL longer than {MAX_URL_LENGTH} characters (fail-closed)"
+    # WHATWG URL parsers strip ASCII tabs/newlines before parsing while
+    # urlsplit does not — a tab can smuggle a loopback host past the parser
+    # (e.g. http://127.0.0.1\t@example.com/). Deny control characters
+    # outright so parser differentials cannot bypass the pre-check.
+    if any(ord(c) < 32 or ord(c) == 127 for c in url):
+        return "URL contains control characters (fail-closed)"
+    fail_closed = (
+        resolver_fail_closed()
+        if fail_closed_on_unresolvable is None
+        else fail_closed_on_unresolvable
+    )
     try:
         parts = urlsplit(url)
     except Exception:
@@ -353,10 +391,19 @@ def deny_reason_for_url(url: str, timeout: float = 3.0) -> str | None:
             return f"host '{literal.compressed}' is not globally routable (fail-closed)"
         return None
 
-    resolved = resolve_host(host, timeout=timeout)
+    try:
+        resolved = resolve_host(host, timeout=timeout)
+    except Exception:
+        # Resolver unavailable/timed out: fail closed by default so an
+        # automated client cannot slip targets past the first layer.
+        if fail_closed:
+            return f"host '{host}' DNS resolution failed (fail-closed)"
+        return None
     if not resolved:
-        # Cannot resolve here: delegate to Smokescreen, which denies
-        # unresolvable hosts at connection time.
+        # Cannot resolve here: fail closed by default; Smokescreen remains
+        # the per-connection enforcement point when the operator opts out.
+        if fail_closed:
+            return f"host '{host}' unresolvable (fail-closed)"
         return None
     parsed = []
     for candidate in resolved:
