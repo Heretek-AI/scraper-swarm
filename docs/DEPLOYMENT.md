@@ -94,30 +94,34 @@ tailscale funnel 443 on
 4. Copy the automatically generated configuration snippet.
 
 ### Configure OpenCode v2:
-Paste the generated snippet into your `~/.config/opencode/opencode.json` (or workspace `.opencode/opencode.json`):
+Paste the generated snippet into your `~/.config/opencode/opencode.json` (or workspace `.opencode/opencode.json`). The snippet shape is fixed — `type: "remote"` with the Caddy-routed gateway origin (compose publishes `80`/`443`; there is no direct `:8000` port):
 
 ```json
 {
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["@scraper-swarm/opencode-plugin"],
   "mcp": {
-    "servers": {
-      "scraper-swarm": {
-        "url": "http://localhost:8000/mcp",
-        "transport": "http",
-        "headers": {
-          "Authorization": "Bearer swarm_sec_YOUR_GENERATED_KEY"
-        }
-      }
+    "scraper-swarm": {
+      "type": "remote",
+      "url": "https://<your-gateway>/mcp",
+      "headers": {
+        "Authorization": "Bearer swarm_sec_YOUR_GENERATED_KEY"
+      },
+      "enabled": true
     }
-  },
-  "plugins": [
-    "@scraper-swarm/opencode-plugin"
-  ]
+  }
 }
 ```
 
+The gateway speaks Streamable HTTP: `POST /mcp` with JSON-RPC 2.0 bodies
+(no SSE, no `Mcp-Session-Id`, no batching). Available tools (scope-filtered
+per key — see `tools/list`): `web_search`, `fetch_page`, `deep_research`,
+`stealth_scrape`. Full protocol reference: `docs/opencode-integration.md`
+(§3–§3b) and the versioned fixtures in `contract/v1/fixtures/`.
+
 The `@scraper-swarm/opencode-plugin` will:
 - Intercept any unmonitored raw outbound web fetches attempted by the model.
-- Halt raw socket access and instruct the model to use the authenticated `swarm_fetch` and `swarm_search` MCP tools.
+- Halt raw socket access and instruct the model to use the authenticated scraper-swarm MCP tools (`web_search`, `fetch_page`).
 - Enable the `/swarm-status` slash command directly within your OpenCode sessions.
 
 ---
@@ -138,8 +142,8 @@ The `@scraper-swarm/opencode-plugin` will:
                  ┌────────────────────┴────────────────────┐
                  ▼                                         ▼
    ┌───────────────────────────┐             ┌───────────────────────────┐
-   │         panel-api         │             │      gateway (MCP 2.x)    │
-   │  - SQLite + AES-256 Vault │             │  - JSON-RPC 2.0 / Stream  │
+   │         panel-api         │             │      gateway (MCP)    │
+   │  - SQLite + AES-256 Vault │             │  - JSON-RPC 2.0 / Streamable HTTP│
    │  - TOTP 2FA + RBAC        │             │  - Bearer Token Auth      │
    │  - SHA-256 Hash Chain Log │             │  - Query Audit Logging    │
    └─────────────┬─────────────┘             └─────────────┬─────────────┘

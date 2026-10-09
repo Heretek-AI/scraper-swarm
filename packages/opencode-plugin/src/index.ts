@@ -2,7 +2,7 @@
  * OpenCode Plugin for Scraper Swarm.
  *
  * Implements:
- * 1. tool.execute.before guard blocking unauthenticated/direct raw fetch and directing agent to swarm_fetch
+ * 1. tool.execute.before guard blocking unauthenticated/direct raw fetch and directing the agent to the scraper-swarm MCP tools (web_search, fetch_page)
  * 2. Slash command /swarm-status
  *
  * Phase 03-opencode-integration (P2 OpenCode v2 live integration) fetch-guard proof:
@@ -12,8 +12,8 @@
  *
  * Design note (AC4): the OpenCode v2 hook surface cannot re-route a tool call
  * to a different tool, so the guard BLOCKS raw `webfetch`/`fetch` with an
- * error naming the correct swarm MCP tool (`swarm_fetch` / scraper-swarm
- * gateway). The Agent Workbench console (`WorkbenchView`) is the equivalent
+ * error naming the correct swarm MCP tools (the scraper-swarm gateway's
+ * `web_search` / `fetch_page`). The Agent Workbench console (`WorkbenchView`) is the equivalent
  * interactive path: it POSTs JSON-RPC `tools/call` to `/mcp` directly, so its
  * traffic always flows through gateway auth, scope checks, SSRF pre-deny,
  * and hash-chained audit. Unit proof lives in `src/index.test.ts` (vitest).
@@ -128,7 +128,7 @@ function shellArgsLookLikeExfil(args: Record<string, any>): boolean {
 function blockedMessage(tool: string): string {
   return (
     `[Scraper Swarm Guard] Direct web fetch via tool '${tool}' is blocked by security policy. ` +
-    `Use the swarm_fetch / scraper-swarm MCP tool to route through egress controls and SSRF filters.`
+    `Use the scraper-swarm MCP tools (web_search, fetch_page) to route through egress controls and SSRF filters.`
   );
 }
 

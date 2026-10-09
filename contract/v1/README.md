@@ -40,10 +40,5 @@ robots follow-up in `docs/robots-ua-decision.md`).
 
 ## Versioning rules
 
-- **Additive** (new optional fields, new tools, new codes, new fixtures):
-  stays v1; consumers keep working; fixtures grow.
-- **Breaking** (remove/rename a field, change semantics, new required
-  params): new contract version (`X-Swarm-Contract: 2`, new
-  `contract/v2/fixtures/`), announced in advance on the consumer ticket.
-  The old version stays served until consumers migrate (to be decided at
-  v2 time).
+Canonical rules live in [`../README.md`](../README.md) (additive → same
+version, breaking → new version + advance notice). v1 is current.

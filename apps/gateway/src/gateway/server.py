@@ -1275,7 +1275,7 @@ def create_gateway_app() -> FastAPI:
                         r = await client.post(
                             "http://gpt-researcher:8000/research", json={"query": q}
                         )
-                        result = r.text
+                        result_text = r.text
                     except httpx.TimeoutException as e:
                         return _render_tool_result(
                             rpc_id,
@@ -1289,7 +1289,7 @@ def create_gateway_app() -> FastAPI:
                 return {
                     "jsonrpc": "2.0",
                     "id": rpc_id,
-                    "result": {"content": [{"type": "text", "text": _cap_text(result)}]},
+                    "result": {"content": [{"type": "text", "text": _cap_text(result_text)}]},
                 }
 
             elif name == "stealth_scrape":
@@ -1330,7 +1330,7 @@ def create_gateway_app() -> FastAPI:
                         r = await client.post(
                             "http://scrapling:8000/fetch", json={"url": target_url}
                         )
-                        result = r.text
+                        result_text = r.text
                     except httpx.TimeoutException as e:
                         return _render_tool_result(
                             rpc_id,
@@ -1343,7 +1343,7 @@ def create_gateway_app() -> FastAPI:
                 return {
                     "jsonrpc": "2.0",
                     "id": rpc_id,
-                    "result": {"content": [{"type": "text", "text": _cap_text(result)}]},
+                    "result": {"content": [{"type": "text", "text": _cap_text(result_text)}]},
                 }
 
         # Unknown top-level method (notifications already returned 202 above).
