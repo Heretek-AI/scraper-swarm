@@ -104,7 +104,10 @@ class AuditLogger:
         The horizon is the newest row older than the cutoff; every
         non-checkpoint row up to and including it is deleted (a contiguous
         id prefix — timestamps are monotonic in practice). Checkpoint rows
-        are never deleted. Returns the deleted count (0 writes no checkpoint).
+        at or below the horizon are collapsed into the new unified
+        checkpoint (they cover a prefix now subsumed by it); checkpoints
+        above the horizon are retained. Returns the deleted non-checkpoint
+        count (0 writes no checkpoint).
         """
         async with self.db.execute(
             "SELECT MAX(id) AS horizon FROM audit_log"
@@ -128,6 +131,14 @@ class AuditLogger:
             count = count_row["n"] if count_row else 0
         await self.db.execute(
             "DELETE FROM audit_log WHERE id <= ? AND action != 'audit_checkpoint'",
+            (horizon,),
+        )
+        # Collapse prior checkpoints covered by the new unified checkpoint:
+        # an earlier checkpoint at/below the horizon would otherwise leave
+        # rows after it unlinked to the newest checkpoint head (double-prune
+        # chain breakage). Checkpoints above the horizon are retained.
+        await self.db.execute(
+            "DELETE FROM audit_log WHERE id <= ? AND action = 'audit_checkpoint'",
             (horizon,),
         )
         await self.db.commit()

@@ -210,3 +210,29 @@ def test_gateway_url_with_control_chars_denied():
     assert deny_reason_for_url("http://127.0.0.1\t@example.com/") is not None
     assert deny_reason_for_url("http://127.0.0.1\n@example.com/") is not None
     assert deny_reason_for_url("http://example.com/\r\nX: 1") is not None
+
+
+def test_gateway_backslash_parser_differential_denied(monkeypatch):
+    """Defect 1 (SSRF backslash): WHATWG treats \\ as path delimiter while
+    urlsplit treats it as userinfo — 169.254.169.254\\@example.com connects
+    to 169.254.169.254 per browser. Must fail closed without DNS."""
+    # example.com (the urlsplit-visible host) resolves public, so without the
+    # backslash guard these URLs would be ALLOWED (None). The guard must deny
+    # before DNS.
+    monkeypatch.setattr(ssrf_guard, "resolve_host", lambda host, timeout=3.0: ["93.184.216.34"])
+    assert deny_reason_for_url("http://169.254.169.254\\@example.com/") is not None
+    assert deny_reason_for_url("http://169.254.169.254\\@example.com") is not None
+    assert deny_reason_for_url("http://example.com\\@evil/") is not None
+    assert deny_reason_for_url("http://example.com\\path") is not None
+
+
+def test_gateway_mixed_dns_public_private_denied(monkeypatch):
+    """Defect 2 (mixed DNS): a [public, private] answer must fail closed."""
+    monkeypatch.setattr(
+        ssrf_guard, "resolve_host", lambda host, timeout=3.0: ["93.184.216.34", "10.1.2.3"]
+    )
+    assert deny_reason_for_url("http://example.com/") is not None
+    monkeypatch.setattr(
+        ssrf_guard, "resolve_host", lambda host, timeout=3.0: ["10.1.2.3", "93.184.216.34"]
+    )
+    assert deny_reason_for_url("http://example.com/") is not None

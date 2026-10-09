@@ -413,10 +413,14 @@ def deny_reason_for_url(
         return f"URL longer than {MAX_URL_LENGTH} characters (fail-closed)"
     # WHATWG URL parsers strip ASCII tabs/newlines before parsing while
     # urlsplit does not — a tab can smuggle a loopback host past the parser
-    # (e.g. http://127.0.0.1\t@example.com/). Deny control characters
-    # outright so parser differentials cannot bypass the pre-check.
-    if any(ord(c) < 32 or ord(c) == 127 for c in url):
-        return "URL contains control characters (fail-closed)"
+    # (e.g. http://127.0.0.1\t@example.com/). WHATWG browsers also treat
+    # backslash as a path delimiter while urlsplit treats it as userinfo
+    # (e.g. http://169.254.169.254\@example.com/ connects to 169.254.169.254
+    # per browser but urlsplit sees host example.com). Deny control
+    # characters and backslash outright so parser differentials cannot
+    # bypass the pre-check.
+    if any(ord(c) < 32 or ord(c) == 127 or c == "\\" for c in url):
+        return "URL contains forbidden characters (fail-closed)"
     fail_closed = (
         resolver_fail_closed()
         if fail_closed_on_unresolvable is None
@@ -460,6 +464,6 @@ def deny_reason_for_url(
             parsed.append(ipaddress.ip_address(candidate))
         except ValueError:
             continue
-    if parsed and all(not addr.is_global for addr in parsed):
-        return f"host '{host}' resolves only to non-routable addresses (fail-closed)"
+    if parsed and any(not addr.is_global for addr in parsed):
+        return f"host '{host}' resolves to non-routable addresses (fail-closed)"
     return None

@@ -1,5 +1,9 @@
 # Scraper Swarm — Production Control Plane Compose
 # Deploys Caddy Edge Proxy, Panel API, Swarmd Privileged Sidecar, Gateway, and Egress SSRF Guard
+#
+# Operator environment lives in the repo-root .env (copy from .env.example).
+# Launch with: docker compose --env-file ../.env -f deploy/docker-compose.control.yml up -d
+# (env_file entries below also load ../.env into panel-api/gateway containers.)
 
 services:
   caddy:
@@ -24,6 +28,9 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.panel-api
     restart: unless-stopped
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       - SWARM_DATA_DIR=/var/lib/scraper-swarm
       - SWARM_REPO_ROOT=/opt/scraper-swarm
@@ -32,6 +39,12 @@ services:
       # external domain (Caddy uses SWARM_DOMAIN). See .env.example.
       - SWARM_PUBLIC_MCP_URL=${SWARM_PUBLIC_MCP_URL:-}
       - SWARM_DOMAIN=${SWARM_DOMAIN:-localhost}
+      # Gateway contract env (see .env.example): SSRF resolver posture,
+      # audit query privacy / HMAC salt / retention.
+      - SWARM_SSRF_RESOLVER_FAIL_CLOSED=${SWARM_SSRF_RESOLVER_FAIL_CLOSED:-}
+      - SWARM_AUDIT_QUERY_MODE=${SWARM_AUDIT_QUERY_MODE:-verbatim}
+      - SWARM_AUDIT_HMAC_SALT
+      - SWARM_AUDIT_RETENTION_DAYS=${SWARM_AUDIT_RETENTION_DAYS:-}
     volumes:
       - swarm_data:/var/lib/scraper-swarm
       - ../catalog:/opt/scraper-swarm/catalog:ro,z
@@ -45,10 +58,24 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.gateway
     restart: unless-stopped
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       - SWARM_DB_PATH=/var/lib/scraper-swarm/panel.db
       - SEARXNG_URL=http://searxng:8080
       - CRAWL4AI_URL=http://crawl4ai:11235
+      # Gateway contract env (see .env.example + docs/opencode-integration.md):
+      # fetch cap, SSRF resolver posture, audit privacy/retention, deployed
+      # engine set, and public domain/origin for snippets/links.
+      - SWARM_MAX_FETCH_BYTES=${SWARM_MAX_FETCH_BYTES:-3145728}
+      - SWARM_SSRF_RESOLVER_FAIL_CLOSED=${SWARM_SSRF_RESOLVER_FAIL_CLOSED:-}
+      - SWARM_AUDIT_QUERY_MODE=${SWARM_AUDIT_QUERY_MODE:-verbatim}
+      - SWARM_AUDIT_HMAC_SALT
+      - SWARM_AUDIT_RETENTION_DAYS=${SWARM_AUDIT_RETENTION_DAYS:-}
+      - SWARM_DEPLOYED_ENGINES=${SWARM_DEPLOYED_ENGINES:-}
+      - SWARM_DOMAIN=${SWARM_DOMAIN:-localhost}
+      - SWARM_PUBLIC_MCP_URL=${SWARM_PUBLIC_MCP_URL:-}
     volumes:
       # P1-live-smoke audit fix: read-write so live /mcp calls persist agent:*
       # audit rows (hash-chained, sanitized, no secrets). Was :ro which made

@@ -114,10 +114,47 @@ async def test_tamper_after_prune_still_detected(db):
     logger = AuditLogger(db.conn)
     await _log(logger, "old", "gone")
     await _log(logger, "new", "kept")
-    await db.conn.execute("UPDATE audit_log SET timestamp = '2000-01-01T00:00:00+00:00' WHERE action = 'old'")
+    await db.conn.execute(
+        "UPDATE audit_log SET timestamp = '2000-01-01T00:00:00+00:00' WHERE action = 'old'"
+    )
     await db.conn.commit()
     assert await logger.prune_older_than("2026-10-01T00:00:00+00:00") == 1
     assert await logger.verify_chain() is True
     await db.conn.execute("UPDATE audit_log SET target = 'forged' WHERE action = 'new'")
     await db.conn.commit()
     assert await logger.verify_chain() is False
+
+
+@pytest.mark.asyncio
+async def test_double_prune_keeps_chain_verifiable(db):
+    """Defect 3: two successive prunes spanning a checkpoint must verify."""
+    logger = AuditLogger(db.conn)
+    await _log(logger, "a1", "a1")
+    await _log(logger, "a2", "a2")
+    await _log(logger, "a3", "a3")
+    async with db.conn.execute("SELECT id, action FROM audit_log ORDER BY id ASC") as cur:
+        rows = await cur.fetchall()
+    ids = [r["id"] for r in rows]
+    await db.conn.execute(
+        "UPDATE audit_log SET timestamp = '2000-01-01T00:00:00+00:00' WHERE id IN (?, ?)",
+        (ids[0], ids[1]),
+    )
+    await db.conn.execute(
+        "UPDATE audit_log SET timestamp = '2026-10-08T00:00:00+00:00' WHERE id = ?",
+        (ids[2],),
+    )
+    await db.conn.commit()
+    assert await logger.prune_older_than("2026-10-01T00:00:00+00:00") == 2
+    assert await logger.verify_chain() is True
+    await _log(logger, "a4", "a4")
+    await _log(logger, "a5", "a5")
+    async with db.conn.execute("SELECT id FROM audit_log WHERE action IN ('a3', 'a4')") as cur:
+        old_ids = [r["id"] for r in await cur.fetchall()]
+    assert len(old_ids) == 2
+    await db.conn.execute(
+        f"UPDATE audit_log SET timestamp = '2000-01-01T00:00:00+00:00' WHERE id IN ({','.join('?' * len(old_ids))})",
+        tuple(old_ids),
+    )
+    await db.conn.commit()
+    assert await logger.prune_older_than("2026-10-01T00:00:00+00:00") == 2
+    assert await logger.verify_chain() is True
