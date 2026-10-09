@@ -1,6 +1,6 @@
 [project]
 name = "gateway"
-version = "0.0.1"
+version = "0.1.0"
 description = "MCP gateway aggregating search and scraper backends for AI agents"
 requires-python = ">=3.12"
 dependencies = [

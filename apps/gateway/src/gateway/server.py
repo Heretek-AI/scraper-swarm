@@ -15,11 +15,11 @@ import logging
 import os
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import aiosqlite
 import httpx
-from fastapi import Cookie, FastAPI, Header, HTTPException, Request, status
+from fastapi import Cookie, FastAPI, Header, HTTPException, Request, Response, status
 from mcp.server.mcpserver import MCPServer
 from panel_api.audit import AuditLogger
 from panel_api.ssrf_guard import (
@@ -30,6 +30,8 @@ from panel_api.ssrf_guard import (
     sanitize_details,
 )
 from pydantic import BaseModel, Field
+
+from gateway import __version__ as GATEWAY_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -278,7 +280,7 @@ async def _ensure_gateway_agent_key_schema(db: aiosqlite.Connection) -> None:
 async def verify_agent_token(
     auth_header: str | None = None,
     cookie_token: str | None = None,
-    required_scope: str = "search",
+    required_scope: str | None = "search",
     enforce_rate_limit: bool = True,
 ) -> dict[str, Any]:
     """Validates Bearer token against agent_keys or session cookie against sessions.
@@ -287,6 +289,11 @@ async def verify_agent_token(
     via a per-key 60s sliding window. Per-tool re-verifications within one
     request pass ``enforce_rate_limit=False`` so a single HTTP call costs one
     rate-limit hit.
+
+    Ticket #4: ``required_scope=None`` authenticates any valid key/session
+    without a scope check. The /mcp entry uses this so initialize/tools/list
+    work for every key while tools/list filters and each tools/call branch
+    enforces its own scope.
     """
     # Allow scope to be passed as second positional argument if needed
     if cookie_token in ("search", "scrape", "admin"):
@@ -375,8 +382,19 @@ async def verify_agent_token(
                         detail="Agent API key expiry invalid",
                     ) from None
 
-            scopes = json.loads(row["scopes"])
-            if required_scope not in scopes and "admin" not in scopes:
+            # Corrupt scopes must fail closed (401), never 500.
+            try:
+                scopes = json.loads(row["scopes"])
+            except Exception:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or revoked agent API key",
+                ) from None
+            if (
+                required_scope is not None
+                and required_scope not in scopes
+                and "admin" not in scopes
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Key lacks required scope '{required_scope}'",
@@ -454,7 +472,7 @@ async def verify_agent_token(
                         "role": role,
                     }
                 elif role == "viewer":
-                    if required_scope == "search":
+                    if required_scope is None or required_scope == "search":
                         if enforce_rate_limit:
                             _check_rate_limit(f"session:{row['user_id']}", 60)
                         return {
@@ -575,8 +593,113 @@ class FetchRequest(BaseModel):
     url: str
 
 
+# ---- Ticket #4 (MCP / JSON-RPC 2.0 conformance) --------------------------------
+#
+# Tool input schemas are defined once as Pydantic models. tools/list serves
+# schemas generated from these same models, and tools/call validates arguments
+# with them (failures -> JSON-RPC -32602). Behavioural basis: Concord MCP
+# jsonrpc-strict.ts (clean-room port: no code copied).
+SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
+LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[-1]
+
+
+class WebSearchArgs(BaseModel):
+    query: str = Field(min_length=1)
+    limit: int = Field(default=5, ge=WEB_SEARCH_LIMIT_MIN, le=WEB_SEARCH_LIMIT_MAX)
+
+
+class FetchPageArgs(BaseModel):
+    url: str = Field(
+        min_length=1,
+        description="Target webpage URL to crawl (max 2048 chars; longer URLs are SSRF-denied)",
+    )
+
+
+class DeepResearchArgs(BaseModel):
+    query: str = Field(min_length=1)
+
+
+class StealthScrapeArgs(BaseModel):
+    url: str = Field(
+        min_length=1,
+        description="Target webpage URL (max 2048 chars; longer URLs are SSRF-denied)",
+    )
+
+
+# name -> (arguments model, required scope, backing engine, description)
+_TOOL_SPECS: dict[str, tuple[type[BaseModel], str, str, str]] = {
+    "web_search": (
+        WebSearchArgs,
+        "search",
+        "searxng",
+        "Search the web using SearXNG meta-search engine.",
+    ),
+    "fetch_page": (
+        FetchPageArgs,
+        "scrape",
+        "crawl4ai",
+        "Scrape and extract markdown content from a webpage using Crawl4AI.",
+    ),
+    "deep_research": (
+        DeepResearchArgs,
+        "search",
+        "gpt-researcher",
+        "Conduct autonomous deep web research and synthesis using GPT Researcher.",
+    ),
+    "stealth_scrape": (
+        StealthScrapeArgs,
+        "scrape",
+        "scrapling",
+        "Extract content from anti-bot protected sites using Scrapling Camoufox stealth engine.",
+    ),
+}
+
+
+def _deployed_engines() -> set[str]:
+    """Engines considered deployed/healthy for tools/list filtering.
+
+    Reads SWARM_DEPLOYED_ENGINES (comma-separated) at call time; unset means
+    all engines. Ticket #7's /ready endpoint is the future truth source —
+    tools/list will prefer it when available (same helper, same shape).
+    """
+    raw = os.environ.get("SWARM_DEPLOYED_ENGINES", "")
+    engines = {e.strip() for e in raw.split(",") if e.strip()}
+    if engines:
+        return engines
+    return {spec[2] for spec in _TOOL_SPECS.values()}
+
+
+def _visible_tools(scopes: list[str]) -> list[dict[str, Any]]:
+    """Tools the caller may see: required scope held AND engine deployed."""
+    deployed = _deployed_engines()
+    out: list[dict[str, Any]] = []
+    for name, (model, scope, engine, desc) in _TOOL_SPECS.items():
+        if scope not in scopes and "admin" not in scopes:
+            continue
+        if engine not in deployed:
+            continue
+        out.append({"name": name, "description": desc, "inputSchema": model.model_json_schema()})
+    return out
+
+
+def _rpc_error(rpc_id: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": code, "message": message}}
+
+
+def _params_error_detail(exc: Exception) -> str:
+    from pydantic import ValidationError as _VE
+
+    if isinstance(exc, _VE):
+        parts = []
+        for er in exc.errors(include_url=False):
+            loc = ".".join(str(p) for p in er.get("loc", ()))
+            parts.append(f"{loc or 'arguments'}: {er.get('msg', 'invalid')}")
+        return "Invalid params: " + "; ".join(parts[:5])
+    return f"Invalid params: {exc}"
+
+
 def create_gateway_app() -> FastAPI:
-    app = FastAPI(title="Scraper Swarm MCP Gateway", version="0.1.0")
+    app = FastAPI(title="Scraper Swarm MCP Gateway", version=GATEWAY_VERSION)
 
     @app.get("/health")
     async def health():
@@ -588,17 +711,33 @@ def create_gateway_app() -> FastAPI:
         authorization: str | None = Header(None),
         swarm_session: str | None = Cookie(None),
     ):
-        """Authenticated MCP Streamable HTTP endpoint supporting JSON-RPC 2.0."""
+        """Authenticated MCP Streamable HTTP endpoint with strict JSON-RPC 2.0 semantics.
+
+        Ticket #4: malformed JSON -> -32700; wrong version/method shape ->
+        -32600; unknown method/tool -> -32601; bad tool arguments -> -32602;
+        requests without an id are notifications -> HTTP 202 with no body;
+        the id is echoed exactly (never defaulted). Authentication and the
+        single per-request rate-limit hit still run first for every call,
+        including initialize/tools/list (uniform-cost decision, documented).
+        """
         cookie_val = swarm_session or request.cookies.get("swarm_session")
 
+        parse_error = False
+        body_is_object = False
         body: dict[str, Any] = {}
         try:
-            body = await request.json()
+            parsed = await request.json()
         except Exception as e:
+            parse_error = True
             log.debug("Failed to parse request JSON: %s", e)
+            parsed = None
+        if isinstance(parsed, dict):
+            body_is_object = True
+            body = parsed
 
         method = body.get("method")
-        rpc_id = body.get("id", 1)
+        has_id = "id" in body
+        rpc_id = body.get("id")
         _attempted_tool: str | None = None
         if isinstance(body.get("params"), dict):
             _attempted_tool = body["params"].get("name")
@@ -607,114 +746,122 @@ def create_gateway_app() -> FastAPI:
             agent = await verify_agent_token(
                 auth_header=authorization,
                 cookie_token=cookie_val,
-                required_scope="search",
+                required_scope=None,
             )
         except HTTPException as e:
             if e.status_code in (401, 403, 429):
                 await _audit_denied(
                     None,
                     "auth_denied",
-                    target=_attempted_tool or method,
+                    target=_attempted_tool or (method if isinstance(method, str) else None),
                     details={
                         "status": e.status_code,
-                        "method": method,
+                        "method": method if isinstance(method, str) else None,
                         "tool": _attempted_tool,
                     },
                 )
             raise
 
+        if parse_error:
+            return _rpc_error(None, -32700, "Parse error: malformed JSON")
+        if not body_is_object:
+            return _rpc_error(None, -32600, "Invalid Request: body must be a JSON object")
+        if body.get("jsonrpc") != "2.0":
+            return _rpc_error(rpc_id, -32600, "Invalid Request: jsonrpc must be '2.0'")
+        if not isinstance(method, str) or not method:
+            return _rpc_error(rpc_id, -32600, "Invalid Request: method must be a string")
+        if not has_id:
+            # Notification: authenticated, then acknowledged with no body.
+            return Response(status_code=202)
+
         if method == "initialize":
+            params = body.get("params")
+            if not isinstance(params, dict):
+                params = {}
+            client_version = params.get("protocolVersion")
+            negotiated = (
+                client_version
+                if client_version in SUPPORTED_PROTOCOL_VERSIONS
+                else LATEST_PROTOCOL_VERSION
+            )
             return {
                 "jsonrpc": "2.0",
                 "id": rpc_id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": negotiated,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "ScraperSwarmGateway", "version": "0.1.0"},
+                    "serverInfo": {"name": "ScraperSwarmGateway", "version": GATEWAY_VERSION},
                 },
             }
 
         elif method == "tools/list":
+            scopes = agent.get("scopes", [])
+            if isinstance(scopes, str):
+                try:
+                    scopes = json.loads(scopes)
+                except Exception:
+                    scopes = []
+            if not isinstance(scopes, list):
+                scopes = []
+            scopes = [s for s in scopes if isinstance(s, str)]
             return {
                 "jsonrpc": "2.0",
                 "id": rpc_id,
-                "result": {
-                    "tools": [
-                        {
-                            "name": "web_search",
-                            "description": "Search the web using SearXNG meta-search engine.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "query": {"type": "string", "description": "Search keywords"},
-                                    "limit": {
-                                        "type": "integer",
-                                        "description": "Max results",
-                                        "default": 5,
-                                    },
-                                },
-                                "required": ["query"],
-                            },
-                        },
-                        {
-                            "name": "fetch_page",
-                            "description": (
-                                "Scrape and extract markdown content from a webpage using Crawl4AI."
-                            ),
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "url": {
-                                        "type": "string",
-                                        "description": "Target webpage URL to crawl",
-                                    },
-                                },
-                                "required": ["url"],
-                            },
-                        },
-                        {
-                            "name": "deep_research",
-                            "description": (
-                                "Conduct autonomous deep web research and synthesis "
-                                "using GPT Researcher."
-                            ),
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "query": {
-                                        "type": "string",
-                                        "description": "Research question or topic",
-                                    },
-                                },
-                                "required": ["query"],
-                            },
-                        },
-                        {
-                            "name": "stealth_scrape",
-                            "description": (
-                                "Extract content from anti-bot protected sites using "
-                                "Scrapling Camoufox stealth engine."
-                            ),
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "url": {"type": "string", "description": "Target webpage URL"},
-                                },
-                                "required": ["url"],
-                            },
-                        },
-                    ]
-                },
+                "result": {"tools": _visible_tools(list(scopes))},
             }
 
         elif method == "tools/call":
             params = body.get("params", {})
+            if not isinstance(params, dict):
+                return _rpc_error(rpc_id, -32602, "Invalid params: params must be an object")
             name = params.get("name")
-            args = params.get("arguments", {})
+            spec = _TOOL_SPECS.get(name) if isinstance(name, str) else None
+            if spec is None:
+                await _audit_denied(
+                    str(agent.get("name", "unknown")),
+                    "unknown_tool",
+                    target=str(name) if name else method,
+                    details={"code": -32601, "tool": name},
+                )
+                return {
+                    "jsonrpc": "2.0",
+                    "id": rpc_id,
+                    "error": {"code": -32601, "message": f"Method {name} not found"},
+                }
+            args_model, required_scope, _engine, _desc = spec
+            raw_args = params.get("arguments", {})
+            if not isinstance(raw_args, dict):
+                return _rpc_error(rpc_id, -32602, "Invalid params: arguments must be an object")
+            if name == "web_search":
+                # Ticket #6: clamp the limit before validation so over-range
+                # values are bounded (never a validation error); genuinely bad
+                # params (missing/wrong-typed query) still yield -32602.
+                raw_args = {**raw_args, "limit": _clamp_limit(raw_args.get("limit", 5))}
+            try:
+                args = args_model.model_validate(raw_args)
+            except Exception as e:
+                return _rpc_error(rpc_id, -32602, _params_error_detail(e))
 
             if name == "web_search":
-                q = args.get("query", "")
-                limit = _clamp_limit(args.get("limit", 5))
+                args = cast(WebSearchArgs, args)
+                try:
+                    agent = await verify_agent_token(
+                        auth_header=authorization,
+                        cookie_token=cookie_val,
+                        required_scope="search",
+                        enforce_rate_limit=False,
+                    )
+                except HTTPException as e:
+                    if e.status_code in (401, 403, 429):
+                        await _audit_denied(
+                            str(agent.get("name", "unknown")),
+                            "web_search_denied",
+                            target=args.query,
+                            details={"status": e.status_code, "reason": e.detail},
+                        )
+                    raise
+                q = args.query
+                limit = _clamp_limit(args.limit)
                 await log_agent_activity(
                     agent["name"], "web_search", target=q, details={"limit": limit}
                 )
@@ -726,6 +873,7 @@ def create_gateway_app() -> FastAPI:
                 }
 
             elif name == "fetch_page":
+                args = cast(FetchPageArgs, args)
                 try:
                     await verify_agent_token(
                         auth_header=authorization,
@@ -738,11 +886,11 @@ def create_gateway_app() -> FastAPI:
                         await _audit_denied(
                             str(agent.get("name", "unknown")),
                             "fetch_page_denied",
-                            target=args.get("url", ""),
+                            target=args.url,
                             details={"status": e.status_code, "reason": e.detail},
                         )
                     raise
-                target_url = args.get("url", "")
+                target_url = args.url
                 # Ticket #6: handler-level pre-check (defense in depth; the
                 # tool function checks again before delegating to Crawl4AI).
                 denial = await _ssrf_precheck(target_url)
@@ -765,6 +913,7 @@ def create_gateway_app() -> FastAPI:
                 }
 
             elif name == "deep_research":
+                args = cast(DeepResearchArgs, args)
                 try:
                     await verify_agent_token(
                         auth_header=authorization,
@@ -777,11 +926,11 @@ def create_gateway_app() -> FastAPI:
                         await _audit_denied(
                             str(agent.get("name", "unknown")),
                             "deep_research_denied",
-                            target=args.get("query", ""),
+                            target=args.query,
                             details={"status": e.status_code, "reason": e.detail},
                         )
                     raise
-                q = args.get("query", "")
+                q = args.query
                 await log_agent_activity(agent["name"], "deep_research", target=q)
                 async with httpx.AsyncClient(timeout=120.0) as client:
                     try:
@@ -798,6 +947,7 @@ def create_gateway_app() -> FastAPI:
                 }
 
             elif name == "stealth_scrape":
+                args = cast(StealthScrapeArgs, args)
                 try:
                     await verify_agent_token(
                         auth_header=authorization,
@@ -810,11 +960,11 @@ def create_gateway_app() -> FastAPI:
                         await _audit_denied(
                             str(agent.get("name", "unknown")),
                             "stealth_scrape_denied",
-                            target=args.get("url", ""),
+                            target=args.url,
                             details={"status": e.status_code, "reason": e.detail},
                         )
                     raise
-                target_url = args.get("url", "")
+                target_url = args.url
                 # Ticket #6: stealth_scrape previously skipped the SSRF
                 # pre-check entirely and went straight to Scrapling, letting an
                 # internal/peer URL bypass the egress proxy via NO_PROXY.
@@ -845,21 +995,8 @@ def create_gateway_app() -> FastAPI:
                     "result": {"content": [{"type": "text", "text": _cap_text(result)}]},
                 }
 
-            else:
-                await _audit_denied(
-                    str(agent.get("name", "unknown")),
-                    "unknown_tool",
-                    target=str(name) if name else method,
-                    details={"code": -32601, "tool": name},
-                )
-                return {
-                    "jsonrpc": "2.0",
-                    "id": rpc_id,
-                    "error": {"code": -32601, "message": f"Method {name} not found"},
-                }
-
-        # Fallback probe for status or handshake check
-        return {"status": "connected", "tools": ["web_search", "fetch_page"]}
+        # Unknown top-level method (notifications already returned 202 above).
+        return _rpc_error(rpc_id, -32601, f"Method {method} not found")
 
     @app.post("/api/search")
     async def rest_search(

@@ -86,6 +86,22 @@ Expected status codes:
 Multi-replica deployments needing a shared budget should move the bucket to
 Valkey; the gateway helper (`_check_rate_limit`) is the seam.
 
+JSON-RPC 2.0 conformance (ticket #4): malformed JSON returns `-32700`;
+a missing/non-`"2.0"` envelope or non-string method returns `-32600`;
+unknown methods *and* unknown tools return `-32601`; invalid tool arguments
+return `-32602` with a per-field message. Requests without an `id` are
+notifications: `HTTP 202` with no body. The `id` (string or number) is
+echoed exactly. `initialize` negotiates: a supported client
+`protocolVersion` (`2024-11-05`, `2025-03-26`, `2025-06-18`) is echoed,
+otherwise the server answers its latest; `serverInfo.version` is the single
+gateway package version. `tools/list` shows only tools whose scope the key
+holds *and* whose engine is deployed (`SWARM_DEPLOYED_ENGINES` override;
+`/ready` in #7 becomes the truth source), with `inputSchema` generated from
+the same Pydantic models that validate `tools/call` arguments. Every call —
+including `initialize`/`tools/list` — is authenticated and costs one
+rate-limit hit (uniform-cost decision: simpler accounting, and the `429`
+contract is unchanged).
+
 Request/response bounds (ticket #6): `web_search` `limit` is clamped to
 `1–20` (REST `POST /api/search` validates `422` outside that range); URLs
 over `2048` characters are SSRF-denied without DNS; fetched result text is
