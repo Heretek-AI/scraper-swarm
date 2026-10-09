@@ -72,12 +72,22 @@ async def test_gateway_auth_required(test_env):
 @pytest.mark.asyncio
 async def test_gateway_authenticated_mcp(test_env):
     client, raw_key, _ = test_env
-    r = await client.post("/mcp", headers={"Authorization": f"Bearer {raw_key}"})
+    headers = {"Authorization": f"Bearer {raw_key}"}
+    # Ticket #4: a bodyless POST is a JSON-RPC parse error (-32700), not a
+    # handshake probe. The old {"status": "connected"} fallback is gone.
+    r = await client.post("/mcp", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["error"]["code"] == -32700
+    # tools/list reflects the fixture key's full scopes (all four tools).
+    r = await client.post(
+        "/mcp", headers=headers, json={"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+    )
     assert r.status_code == 200
     data = r.json()
-    assert data["status"] == "connected"
-    assert "web_search" in data["tools"]
-    assert "fetch_page" in data["tools"]
+    assert data["id"] == 1
+    names = [t["name"] for t in data["result"]["tools"]]
+    assert "web_search" in names
+    assert "fetch_page" in names
 
 
 @pytest.mark.asyncio
