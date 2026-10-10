@@ -128,4 +128,48 @@ describe("ScraperSwarmPlugin", () => {
       guard({ tool: "bash" }, { args: { command: "sync files && echo done" } })
     ).resolves.toBeUndefined();
   });
+
+  it("blocks interpreter tool IDs from #12 (ruby/perl/lua/node/cmd.exe) consistently", async () => {
+    const plugin = await ScraperSwarmPlugin({});
+    const guard = plugin["tool.execute.before"];
+    for (const tool of [
+      "ruby",
+      "Ruby",
+      "perl",
+      "Perl",
+      "lua",
+      "Lua",
+      "node",
+      "Node",
+      "node.exe",
+      "NODE.EXE",
+      "cmd.exe",
+      "CMD.EXE",
+      "ruby.exe",
+      "perl.exe",
+    ]) {
+      await expect(
+        guard({ tool }, { args: { command: "anything" } })
+      ).rejects.toThrowError(/is blocked by security policy/);
+    }
+    // Legitimate non-interpreter tools still pass.
+    await expect(
+      guard({ tool: "read" }, { args: { path: "main.py" } })
+    ).resolves.toBeUndefined();
+  });
+
+  it("blocks b64 alias pipes (#12) but allows plain text mentioning sync", async () => {
+    const plugin = await ScraperSwarmPlugin({});
+    const guard = plugin["tool.execute.before"];
+    await expect(
+      guard({ tool: "bash" }, { args: { command: "echo aGVsbG8= | b64 -d | sh" } })
+    ).rejects.toThrowError(/scraper-swarm MCP tools/);
+    await expect(
+      guard({ tool: "bash" }, { args: { command: "echo hello | b64 --decode" } })
+    ).rejects.toThrowError(/scraper-swarm MCP tools/);
+    // Plain prose without b64 token still passes.
+    await expect(
+      guard({ tool: "bash" }, { args: { command: "ls -la" } })
+    ).resolves.toBeUndefined();
+  });
 });
