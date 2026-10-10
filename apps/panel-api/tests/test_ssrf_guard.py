@@ -236,3 +236,37 @@ def test_gateway_mixed_dns_public_private_denied(monkeypatch):
         ssrf_guard, "resolve_host", lambda host, timeout=3.0: ["10.1.2.3", "93.184.216.34"]
     )
     assert deny_reason_for_url("http://example.com/") is not None
+
+
+# ---- Ticket #13: ftp-userinfo scrub leak in free text ----
+
+
+def test_audit_scrubs_ftp_userinfo_in_prose():
+    """#13: ftp://user:pass@host embedded in prose must not persist."""
+    from panel_api.ssrf_guard import scrub_secrets_from_text
+
+    out = scrub_secrets_from_text("see ftp://admin:s3cretXYZ@files.example/x for data")
+    assert "s3cretXYZ" not in out
+    assert "admin" not in out
+    assert "ftp://files.example/x" in out
+    assert "for data" in out
+
+
+def test_audit_scrubs_ftp_swarm_sec_in_userinfo():
+    """#13: swarm_sec_* in ftp userinfo is stripped with the URL."""
+    from panel_api.ssrf_guard import audit_target_for_action
+
+    out = audit_target_for_action("web_search", "see ftp://swarm_sec_abc123@files.example/x here")
+    assert "swarm_sec_abc123" not in out
+    assert "files.example" in out
+
+
+def test_audit_scrubs_ftp_token_query_in_prose():
+    """#13: password + ?token= on ftp in prose are both redacted."""
+    from panel_api.ssrf_guard import sanitize_details
+
+    out = sanitize_details({"q": "see ftp://admin:pw@files.example/x?token=SECRET123 for data"})
+    assert "SECRET123" not in str(out["q"])
+    assert "pw@" not in str(out["q"])
+    assert "?token=" not in str(out["q"])
+    assert "ftp://files.example/x" in str(out["q"])

@@ -152,13 +152,15 @@ _SECRET_KV_RE = re.compile(
     r"|token|secret|password|passwd|pwd|auth|bearer|session|cookie)"
     r"[_-]*\s*[:=]\s*)([^\s&;\"',]+)"
 )
-_URL_IN_TEXT_RE = re.compile(r"https?://[^\s\"'<>]+")
+# Ticket #13: also match ftp(s) URLs embedded in prose so userinfo/query
+# secrets in non-http(s) URLs are stripped inline like http(s).
+_URL_IN_TEXT_RE = re.compile(r"(?:https?|ftps?)://[^\s\"'<>]+")
 
 _TRUNC_SUFFIX = "…[truncated]"
 
 
 def _redact_embedded_urls(text: str) -> str:
-    """Replaces every embedded http(s) URL with its redacted host-only form."""
+    """Replaces every embedded http(s)/ftp(s) URL with its redacted host-only form."""
 
     def _repl(m: re.Match) -> str:
         raw = m.group(0)
