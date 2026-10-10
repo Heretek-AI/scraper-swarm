@@ -219,13 +219,17 @@ mode) pins the real tool functions against stable engine payloads.
 OpenCode v2 hook surface cannot re-route a call, so block-plus-message is the
 enforced pattern (proven by `npm test` / vitest in that package). Retry2
 broadens the denylist to network-exfil primitives: direct tool names
-`python`/`python3`/`powershell`/`pwsh`/`cmd`/`http_request`/`socket`/`netcat`/
-`nc` are blocked outright, and shell args carrying `/dev/tcp`, `socket`,
-`invoke-webrequest`, `base64` pipes, or `nc` are blocked as exfil intent.
+`python`/`python3`/`powershell`/`pwsh`/`cmd`/`cmd.exe`/`http_request`/`socket`/`netcat`/
+`nc` are blocked outright (#12 adds `ruby`/`perl`/`lua`/`node` plus `.exe`-suffix
+normalization so `node.exe`/`cmd.exe`/`python.exe` behave consistently), and shell args carrying `/dev/tcp`, `socket`,
+`invoke-webrequest`, `base64`/`b64` pipes, or `nc` are blocked as exfil intent.
 Plain `bash ls` (and `sync files`) still passes. Block messages stay generic
 (tool name only, never the URL/args) so secret-bearing queries are never
 echoed. Residual risk: a novel exfil binary or heavily obfuscated one-liner
-the substring list cannot see still passes the editor guard — the gateway
+the substring list cannot see still passes the editor guard — specifically
+arg indirection like `eval $PAYLOAD`, encoded payloads resolved at runtime,
+and full-homoglyph tool IDs (e.g. non-latin lookalikes of `fetch`) cannot be
+closed by substring matching and are accepted as residual — the gateway
 SSRF pre-deny (`deny_reason_for_url`) + Smokescreen per-connection egress
 remain the enforcement backstop. The Workbench console is the equivalent
 interactive path: it calls `/mcp` directly, so every execution carries Bearer

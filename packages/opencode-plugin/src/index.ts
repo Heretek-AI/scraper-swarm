@@ -55,6 +55,8 @@ const SHELL_TOOLS = new Set(["bash", "shell", "exec", "command", "terminal", "sh
 
 // Retry2 P0-4: direct-tool substring blocklist (normalized). Long tokens use
 // substring so versioned variants (python3, powershell.exe) still match.
+// Ticket #12: added interpreter denylist (ruby/perl/lua/node) — .exe suffix
+// is stripped before matching so node.exe/cmd.exe/python.exe behave consistently.
 const BLOCKED_TOOL_SUBSTRINGS = [
   "fetch",
   "curl",
@@ -65,17 +67,27 @@ const BLOCKED_TOOL_SUBSTRINGS = [
   "httprequest",
   "socket",
   "netcat",
+  "ruby",
+  "perl",
+  "lua",
+  "node",
 ];
 
 // Retry2 P0-4: exact-match blocklist for short names where substring would
 // false-positive (e.g. "nc" inside "sync", "cmd" handling kept exact).
-const BLOCKED_TOOL_EXACT = new Set(["cmd", "nc", "ncat"]);
+const BLOCKED_TOOL_EXACT = new Set(["cmd", "cmd.exe", "nc", "ncat"]);
+
+function stripExeSuffix(normalized: string): string {
+  return normalized.endsWith(".exe") ? normalized.slice(0, -4) : normalized;
+}
 
 function isBlockedTool(normalized: string): boolean {
+  const base = stripExeSuffix(normalized);
   for (const part of BLOCKED_TOOL_SUBSTRINGS) {
-    if (normalized.includes(part)) return true;
+    if (base.includes(part)) return true;
   }
   if (BLOCKED_TOOL_EXACT.has(normalized)) return true;
+  if (BLOCKED_TOOL_EXACT.has(base)) return true;
   return false;
 }
 
@@ -110,6 +122,9 @@ function shellArgsLookLikeExfil(args: Record<string, any>): boolean {
       return true;
     if (blob.includes("/dev/tcp") || blob.includes("socket") || blob.includes("base64"))
       return true;
+    // Ticket #12: `b64` alias (busybox/shorthand for base64) with word boundaries
+    // so "echo aGVsbG8= | b64 -d | sh" is blocked but normal prose passes.
+    if (/(?:^|[^a-z0-9])b64(?:[^a-z0-9]|$)/.test(blob)) return true;
     if (blob.includes("netcat") || blob.includes("ncat")) return true;
     // "nc" needs word boundaries: "nc host 4444" blocks, "sync files" passes.
     if (/(?:^|[^a-z])nc(?:[^a-z]|$)/.test(blob)) return true;
