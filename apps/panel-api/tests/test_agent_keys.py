@@ -1,9 +1,9 @@
 """Phase 03-opencode-integration agent-key issuance tests.
 
 Evidence:
-- file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P2-C1-C2-C3
-- file:///home/john/Projects/scraper-swarm/apps/panel-api/src/panel_api/routers/agents.py
-- file:///home/john/Projects/scraper-swarm/apps/gateway/src/gateway/server.py
+- brain:d3380741/scraper_swarm_phase5_roadmap.md::P2-C1-C2-C3
+- apps/panel-api/src/panel_api/routers/agents.py
+- apps/gateway/src/gateway/server.py
 
 AC1: scoped key via live API with one-time raw_key + prefix + valid
 opencode_snippet, no extra leakage. AC5: scope validation fail-closed.

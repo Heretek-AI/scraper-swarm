@@ -6,9 +6,9 @@ in-stack peer DNS such as searxng/crawl4ai/valkey) and covered live by the
 panel-api smoke harness via authenticated ``/mcp`` ``fetch_page`` calls.
 
 Evidence:
-- file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2
-- file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/walkthrough.md::smoke-3-3
-- file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/workbench_fix_walkthrough.md::mcp-proof
+- brain:d3380741/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2
+- brain:d3380741/walkthrough.md::smoke-3-3
+- brain:d3380741/workbench_fix_walkthrough.md::mcp-proof
 
 Security notes:
 - Smokescreen (Go resolver) only parses strict dotted-decimal/IPv6, so

@@ -6,9 +6,9 @@ loopback, RFC1918, CGNAT, link-local/metadata, unspecified, IPv6 loopback,
 resolver cannot parse.
 
 Evidence:
-- file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2
-- file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/walkthrough.md::smoke-3-3
-- file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/workbench_fix_walkthrough.md::mcp-proof
+- brain:d3380741/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2
+- brain:d3380741/walkthrough.md::smoke-3-3
+- brain:d3380741/workbench_fix_walkthrough.md::mcp-proof
 
 All tests are deterministic: literal checks never touch the network (DNS
 resolution is stubbed out and asserted unused), and DNS-name checks stub the

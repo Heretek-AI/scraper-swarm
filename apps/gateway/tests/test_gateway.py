@@ -245,9 +245,9 @@ async def test_gateway_session_cookie_auth(test_env):
 
 
 # Phase 03-opencode-integration (P2 OpenCode v2 live integration):
-# - file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P2-C1-C2-C3
-# - file:///home/john/Projects/scraper-swarm/apps/panel-api/src/panel_api/routers/agents.py
-# - file:///home/john/Projects/scraper-swarm/apps/gateway/src/gateway/server.py
+# - brain:d3380741/scraper_swarm_phase5_roadmap.md::P2-C1-C2-C3
+# - apps/panel-api/src/panel_api/routers/agents.py
+# - apps/gateway/src/gateway/server.py
 # Scope enforcement 403, revoked/expired 401, rate-limit 429, audit zero-secrets.
 
 

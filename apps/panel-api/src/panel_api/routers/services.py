@@ -1,7 +1,7 @@
 """Services router for managing catalog, wizard deployments, and status.
 
 Phase 02-infra-reconcile (evidence:
-file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json):
+.roadmap/01-live-smoke/dossier.json):
 GET /services/status joins DB ``installed_services`` against live Docker
 ``ps`` so DB-vs-Docker drift is visible (01 escalated with DB ``running``
 vs 0 containers and ``test-all 1/3``); on drift it triggers a best-effort
@@ -361,7 +361,7 @@ async def get_reconcile_status(
     """Operator inspect: reconciler desired-state, interval, and last pass.
 
     Phase 02-infra-reconcile (evidence:
-    file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json).
+    .roadmap/01-live-smoke/dossier.json).
     Read-only; triggers no repair.
     """
     try:

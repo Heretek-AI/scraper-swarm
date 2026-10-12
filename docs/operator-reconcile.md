@@ -9,17 +9,17 @@ without manual re-apply.
 
 Background (escalation driver):
 
-- `file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json`
+- `.roadmap/01-live-smoke/dossier.json`
   — "01-live-smoke escalated: AC1/AC2/AC5 FAIL NOW 1/3, DB running vs
   0 containers drift"
-- `file:///home/john/Projects/scraper-swarm/deploy/docker-compose.control.yml`
-- `file:///home/john/Projects/scraper-swarm/apps/swarmd/src/swarmd/server.py`
+- `deploy/docker-compose.control.yml`
+- `apps/swarmd/src/swarmd/server.py`
   — "apply_stack / get_status / service_logs; catalog cache + missing
   deploy context"
-- `file:///home/john/Projects/scraper-swarm/apps/panel-api/src/panel_api/smoke_test.py`
-- `file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2`
+- `apps/panel-api/src/panel_api/smoke_test.py`
+- `brain:d3380741/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2`
   — "Spin up SearXNG + Crawl4AI + Smokescreen; Verify MCP Gateway query execution"
-- `file:///home/john/Projects/scraper-swarm/.roadmap/02-infra-reconcile/dossier.json`
+- `.roadmap/02-infra-reconcile/dossier.json`
 
 ## Behavior
 

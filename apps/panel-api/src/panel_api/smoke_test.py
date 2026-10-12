@@ -3,9 +3,9 @@
 P1 Live Engine Stack Smoke Test (Phase 01-live-smoke):
 Agent -> MCP Gateway (/mcp) -> SearXNG / Crawl4AI -> Smokescreen (:4750) -> Internet.
 Evidence:
-- file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2
-- file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/walkthrough.md::smoke-3-3
-- file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/workbench_fix_walkthrough.md::mcp-proof
+- brain:d3380741/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2
+- brain:d3380741/walkthrough.md::smoke-3-3
+- brain:d3380741/workbench_fix_walkthrough.md::mcp-proof
 
 Security: diagnostics never echo bearer tokens or secret values; messages carry
 only HTTP status codes, latencies, and public result counts.
@@ -25,9 +25,9 @@ import aiosqlite
 import httpx
 
 # P1-live-smoke evidence (Phase 01-live-smoke):
-# - file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2
-# - file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/walkthrough.md::smoke-3-3
-# - file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/workbench_fix_walkthrough.md::mcp-proof
+# - brain:d3380741/scraper_swarm_phase5_roadmap.md::P1-live-smoke-B1-B2
+# - brain:d3380741/walkthrough.md::smoke-3-3
+# - brain:d3380741/workbench_fix_walkthrough.md::mcp-proof
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://gateway:8000")
 

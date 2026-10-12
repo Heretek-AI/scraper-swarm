@@ -327,7 +327,7 @@ export const WorkbenchView: React.FC<WorkbenchViewProps> = ({
                 <Code className="h-3.5 w-3.5 text-primary" /> OpenCode Configuration
               </div>
               {/* Phase 03-opencode-integration (P2-C1-C2-C3): operator path —
-                  file:///home/john/Projects/scraper-swarm/apps/panel-web/src/components/workbench/WorkbenchView.tsx */}
+                  apps/panel-web/src/components/workbench/WorkbenchView.tsx */}
               <p className="text-[11px] text-muted-foreground">
                 1) Click <span className="font-semibold text-foreground">+ Issue Key</span> above
                 (scopes <code>search</code> + <code>scrape</code>); the one-time{" "}

@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+reviews:
+  profile: chill
+  poem: false
+  review_status: false
+  # Recorded evidence, generated fixtures and lockfiles: checked by tests, not by review.
+  path_filters:
+    - "!.roadmap/**"
+    - "!contract/v1/fixtures/**"
+    - "!apps/gateway/tests/engine_fixtures/**"
+    - "!uv.lock"
+    - "!pnpm-lock.yaml"
+  auto_review:
+    enabled: true
+    drafts: false

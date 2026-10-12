@@ -79,7 +79,7 @@ class DockerOrchestrator:
         """Returns ALL containers (running + stopped) for drift detection.
 
         Phase 02-infra-reconcile (evidence:
-        file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json):
+        .roadmap/01-live-smoke/dossier.json):
         plain ``ps`` hides exited containers, so drift between the DB
         ``running`` rows and Docker is invisible. ``ps -a`` distinguishes
         ``missing`` from ``exited``/``dead`` for the reconciler.

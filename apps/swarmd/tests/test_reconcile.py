@@ -2,7 +2,7 @@
 
 No Docker daemon is needed: a fake orchestrator stands in for
 ``DockerOrchestrator``. Evidence:
-file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json
+.roadmap/01-live-smoke/dossier.json
 ("DB running vs 0 containers drift").
 """
 
