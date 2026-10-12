@@ -1,12 +1,12 @@
 # OpenCode v2 Integration — Operator Note (Phase 03)
 
 Evidence:
-- `file:///home/john/.gemini/antigravity-cli/brain/d3380741-a97f-484b-8060-be5ef9374790/scraper_swarm_phase5_roadmap.md::P2-C1-C2-C3`
-- `file:///home/john/Projects/scraper-swarm/apps/panel-api/src/panel_api/routers/agents.py`
-- `file:///home/john/Projects/scraper-swarm/apps/gateway/src/gateway/server.py`
-- `file:///home/john/Projects/scraper-swarm/packages/opencode-plugin/src/index.ts`
-- `file:///home/john/Projects/scraper-swarm/apps/panel-web/src/components/workbench/WorkbenchView.tsx`
-- `file:///home/john/Projects/scraper-swarm/.roadmap/02-infra-reconcile/dossier.json`
+- `brain:d3380741/scraper_swarm_phase5_roadmap.md::P2-C1-C2-C3`
+- `apps/panel-api/src/panel_api/routers/agents.py`
+- `apps/gateway/src/gateway/server.py`
+- `packages/opencode-plugin/src/index.ts`
+- `apps/panel-web/src/components/workbench/WorkbenchView.tsx`
+- `.roadmap/02-infra-reconcile/dossier.json`
 
 ## 1. Issue a scoped agent key (Web Console)
 

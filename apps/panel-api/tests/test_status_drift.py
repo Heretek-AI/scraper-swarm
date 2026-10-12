@@ -1,6 +1,6 @@
 """Unit tests for the Phase 02-infra-reconcile status drift join.
 
-Evidence: file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json
+Evidence: .roadmap/01-live-smoke/dossier.json
 ("DB running vs 0 containers drift").
 """
 

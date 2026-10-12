@@ -1,9 +1,9 @@
 """Unix domain socket server in swarmd to process intents from panel-api.
 
 Phase 02-infra-reconcile (evidence:
-file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json,
-file:///home/john/Projects/scraper-swarm/deploy/docker-compose.control.yml,
-file:///home/john/Projects/scraper-swarm/apps/swarmd/src/swarmd/server.py):
+.roadmap/01-live-smoke/dossier.json,
+deploy/docker-compose.control.yml,
+apps/swarmd/src/swarmd/server.py):
 DB-vs-Docker drift (DB ``running`` vs 0 containers) is repaired by a
 background reconciler loop plus ``reconcile_now`` / ``get_reconcile_status``
 intents. Desired state (``wanted.json``) persists on the stack volume so

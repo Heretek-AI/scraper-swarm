@@ -3,7 +3,7 @@
 Phase 02-infra-reconcile (persistence/reconciliation only):
 - 01-live-smoke escalated with ``installed_services=[searxng running,
   crawl4ai running]`` vs ``docker ps 0x scraper-swarm-*`` drift and
-  ``test-all 1/3`` (evidence: file:///home/john/Projects/scraper-swarm/.roadmap/01-live-smoke/dossier.json).
+  ``test-all 1/3`` (evidence: .roadmap/01-live-smoke/dossier.json).
 - This module persists the last applied ``wanted`` set (``wanted.json`` in
   the stack dir, which lives on the ``swarm_data`` volume so it survives
   swarmd restarts/rebuilds) and, on a timer plus on demand, compares the
@@ -23,7 +23,7 @@ Phase 02-infra-reconcile (persistence/reconciliation only):
   an alert-ready reason (never clean, never fail-open).
 - Reports carry service names, container states, and latencies only --
   never secrets or env values -- so they are safe for audit rows and API
-  responses (evidence: file:///home/john/Projects/scraper-swarm/apps/panel-api/src/panel_api/smoke_test.py).
+  responses (evidence: apps/panel-api/src/panel_api/smoke_test.py).
 """
 
 from __future__ import annotations
