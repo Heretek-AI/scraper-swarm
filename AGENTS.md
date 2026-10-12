@@ -21,7 +21,8 @@ a validation comment: before and after test evidence, drift found, follow-ups.
   (`uv run python apps/gateway/tests/gen_contract_fixtures.py`). An additive
   change keeps the version; a breaking change needs a new contract version and
   advance notice on the consumer. The rules are in `contract/README.md`.
-- **`.roadmap/`** holds recorded factory evidence (`GOAL.md`, `dossier.json`).
+- **`.roadmap/<phase>/`** holds recorded factory evidence (`GOAL.md` and
+  `dossier.json` in each phase directory).
   It stays byte-identical, and the hygiene check skips it. A
   `brain:<id>/<file>::<anchor>` citation in source points at a planning note
   kept outside the repository; the quoted text is in the matching dossier.
@@ -44,7 +45,7 @@ a validation comment: before and after test evidence, drift found, follow-ups.
 
 | Invariant | Where |
 | --- | --- |
-| Published contract fixtures match current gateway behavior byte for byte | `apps/gateway/tests/test_contract_drift.py` |
+| Published contract fixtures equal what the gateway produces now, compared as parsed JSON | `apps/gateway/tests/test_contract_drift.py` |
 | Every fetch path passes a fail-closed SSRF pre-check | `apps/panel-api/src/panel_api/ssrf_guard.py`, `apps/panel-api/tests/test_ssrf_guard.py` |
 | Engines reach the internet only through the Smokescreen egress proxy | `deploy/`, `tests/security/test_ssrf.py` |
 | The audit log is hash-chained and scrubs secrets | `apps/panel-api/src/panel_api/audit.py` |
