@@ -1,0 +1,19 @@
+name: Hygiene
+
+# Keeps machine-local paths out of tracked files. The check itself lives in
+# Heretek-AI/.github. .roadmap/ is recorded factory evidence and stays as written.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    uses: Heretek-AI/.github/.github/workflows/hygiene.yml@main
+    with:
+      exclude: |
+        .roadmap
